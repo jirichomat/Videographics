@@ -62,6 +62,9 @@ class EditHistory {
             undoStack.removeFirst()
         }
 
+        // Log the action for debugging
+        ActionLogger.shared.logPerform(action, details: "Stack size: \(undoStack.count)")
+
         onHistoryChanged?()
     }
 
@@ -72,6 +75,9 @@ class EditHistory {
         action.undo()
         redoStack.append(action)
 
+        // Log the undo for debugging
+        ActionLogger.shared.logUndo(action, details: "Undo stack: \(undoStack.count), Redo stack: \(redoStack.count)")
+
         onHistoryChanged?()
     }
 
@@ -81,6 +87,9 @@ class EditHistory {
 
         action.execute()
         undoStack.append(action)
+
+        // Log the redo for debugging
+        ActionLogger.shared.logRedo(action, details: "Undo stack: \(undoStack.count), Redo stack: \(redoStack.count)")
 
         onHistoryChanged?()
     }

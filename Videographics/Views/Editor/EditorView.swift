@@ -81,6 +81,26 @@ struct EditorView: View {
                     } label: {
                         Label("Reset UI", systemImage: "arrow.counterclockwise")
                     }
+
+                    Button(role: .destructive) {
+                        viewModel.showingResetProjectConfirmation = true
+                    } label: {
+                        Label("Reset Project", systemImage: "trash")
+                    }
+
+                    Divider()
+
+                    Button {
+                        viewModel.logProjectState(context: "Manual log request")
+                    } label: {
+                        Label("Log State", systemImage: "doc.text")
+                    }
+
+                    Button {
+                        viewModel.showingDebugLog = true
+                    } label: {
+                        Label("View Debug Log", systemImage: "ladybug")
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -135,6 +155,9 @@ struct EditorView: View {
         .sheet(isPresented: $viewModel.showingInfographicsSheet) {
             InfographicsSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showingDebugLog) {
+            DebugLogView()
+        }
         .photosPicker(
             isPresented: $viewModel.showingGraphicsPicker,
             selection: $viewModel.selectedGraphicsItem,
@@ -162,6 +185,14 @@ struct EditorView: View {
             if let error = viewModel.importError {
                 Text(error.localizedDescription)
             }
+        }
+        .alert("Reset Project", isPresented: $viewModel.showingResetProjectConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                viewModel.resetProject()
+            }
+        } message: {
+            Text("This will remove all clips, overlays, and undo history. This action cannot be undone.")
         }
     }
 }

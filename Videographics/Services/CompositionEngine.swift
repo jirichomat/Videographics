@@ -27,7 +27,8 @@ actor CompositionEngine {
     }
 
     /// Build an AVMutableComposition from a Timeline
-    func buildComposition(from timeline: Timeline, renderSize: CGSize = AppConstants.defaultResolution) async -> CompositionResult? {
+    /// Default render size is 1080x1920 (portrait 9:16)
+    func buildComposition(from timeline: Timeline, renderSize: CGSize = CGSize(width: 1080, height: 1920)) async -> CompositionResult? {
         let composition = AVMutableComposition()
         var clipInfos: [ClipTrackInfo] = []
 
@@ -301,10 +302,16 @@ actor CompositionEngine {
         // Sort instructions by start time to ensure proper order
         instructions.sort { $0.timeRange.start < $1.timeRange.start }
 
+        // Fill gaps with black instructions to prevent raw video showing
+        let timelineDuration = timeline.duration
+        instructions = fillGapsWithBlackInstructions(
+            instructions: instructions,
+            timelineDuration: timelineDuration
+        )
+
         videoComposition.instructions = instructions
 
         // Add text and graphics overlays using Core Animation
-        let timelineDuration = timeline.duration
         let animationTool = buildOverlayLayers(
             timeline: timeline,
             renderSize: renderSize,
@@ -386,26 +393,40 @@ actor CompositionEngine {
     }
 
     /// Create a CATextLayer for a text clip
-    private func createTextLayer(
+    private nonisolated func createTextLayer(
         from clip: TextClip,
         renderSize: CGSize,
         duration: CMTime
     ) -> CALayer? {
         let textLayer = CATextLayer()
 
+        // Capture clip properties
+        let text = clip.text
+        let fontName = clip.fontName
+        let fontSize = clip.fontSize
+        let clipScale = clip.scale
+        let textColorHex = clip.textColorHex
+        let backgroundColorHex = clip.backgroundColorHex
+        let alignment = clip.alignment
+        let positionX = clip.positionX
+        let positionY = clip.positionY
+        let rotation = clip.rotation
+        let startTime = clip.cmTimelineStartTime
+        let endTime = clip.cmTimelineEndTime
+
         // Set text content and styling
-        textLayer.string = clip.text
-        textLayer.font = CTFontCreateWithName(clip.fontName as CFString, CGFloat(clip.fontSize), nil)
-        textLayer.fontSize = CGFloat(clip.fontSize) * CGFloat(clip.scale)
-        textLayer.foregroundColor = UIColor(hex: clip.textColorHex)?.cgColor ?? UIColor.white.cgColor
+        textLayer.string = text
+        textLayer.font = CTFontCreateWithName(fontName as CFString, CGFloat(fontSize), nil)
+        textLayer.fontSize = CGFloat(fontSize) * CGFloat(clipScale)
+        textLayer.foregroundColor = colorFromHex(textColorHex) ?? UIColor.white.cgColor
 
         // Background color
-        if let bgHex = clip.backgroundColorHex {
-            textLayer.backgroundColor = UIColor(hex: bgHex)?.cgColor
+        if let bgHex = backgroundColorHex {
+            textLayer.backgroundColor = colorFromHex(bgHex)
         }
 
         // Alignment
-        switch clip.alignment {
+        switch alignment {
         case .left:
             textLayer.alignmentMode = .left
         case .center:
@@ -416,14 +437,14 @@ actor CompositionEngine {
 
         textLayer.isWrapped = true
         textLayer.truncationMode = .none
-        textLayer.contentsScale = UIScreen.main.scale
+        textLayer.contentsScale = 2.0 // Use fixed scale for nonisolated context
 
         // Calculate size based on text
         let maxWidth = renderSize.width * 0.9
         let textSize = calculateTextSize(
-            text: clip.text,
-            fontName: clip.fontName,
-            fontSize: CGFloat(clip.fontSize) * CGFloat(clip.scale),
+            text: text,
+            fontName: fontName,
+            fontSize: CGFloat(fontSize) * CGFloat(clipScale),
             maxWidth: maxWidth
         )
 
@@ -431,20 +452,20 @@ actor CompositionEngine {
 
         // Position (convert from normalized -1 to 1 to actual coordinates)
         // In Core Animation, origin is bottom-left
-        let centerX = renderSize.width / 2 + CGFloat(clip.positionX) * (renderSize.width / 2)
-        let centerY = renderSize.height / 2 + CGFloat(clip.positionY) * (renderSize.height / 2)
+        let centerX = renderSize.width / 2 + CGFloat(positionX) * (renderSize.width / 2)
+        let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2)
         textLayer.position = CGPoint(x: centerX, y: centerY)
 
         // Rotation
-        if clip.rotation != 0 {
-            textLayer.transform = CATransform3DMakeRotation(CGFloat(clip.rotation) * .pi / 180, 0, 0, 1)
+        if rotation != 0 {
+            textLayer.transform = CATransform3DMakeRotation(CGFloat(rotation) * .pi / 180, 0, 0, 1)
         }
 
         // Animate visibility (show/hide based on clip timing)
         addVisibilityAnimation(
             to: textLayer,
-            startTime: clip.cmTimelineStartTime,
-            endTime: clip.cmTimelineEndTime,
+            startTime: startTime,
+            endTime: endTime,
             duration: duration
         )
 
@@ -636,8 +657,36 @@ actor CompositionEngine {
         layer.add(animation, forKey: "visibilityAnimation")
     }
 
+    /// Convert hex string to CGColor (nonisolated for use in overlay creation)
+    private nonisolated func colorFromHex(_ hex: String) -> CGColor? {
+        var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
+
+        var rgb: UInt64 = 0
+        guard Scanner(string: hexSanitized).scanHexInt64(&rgb) else { return nil }
+
+        let length = hexSanitized.count
+        if length == 6 {
+            return CGColor(
+                red: CGFloat((rgb & 0xFF0000) >> 16) / 255.0,
+                green: CGFloat((rgb & 0x00FF00) >> 8) / 255.0,
+                blue: CGFloat(rgb & 0x0000FF) / 255.0,
+                alpha: 1.0
+            )
+        } else if length == 8 {
+            return CGColor(
+                red: CGFloat((rgb & 0xFF000000) >> 24) / 255.0,
+                green: CGFloat((rgb & 0x00FF0000) >> 16) / 255.0,
+                blue: CGFloat((rgb & 0x0000FF00) >> 8) / 255.0,
+                alpha: CGFloat(rgb & 0x000000FF) / 255.0
+            )
+        } else {
+            return nil
+        }
+    }
+
     /// Calculate the size needed for text
-    private func calculateTextSize(text: String, fontName: String, fontSize: CGFloat, maxWidth: CGFloat) -> CGSize {
+    private nonisolated func calculateTextSize(text: String, fontName: String, fontSize: CGFloat, maxWidth: CGFloat) -> CGSize {
         let font = UIFont(name: fontName, size: fontSize) ?? UIFont.systemFont(ofSize: fontSize)
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
 
@@ -754,11 +803,90 @@ actor CompositionEngine {
             }
         }
     }
+
+    /// Fill gaps in the instruction list with black (empty) instructions
+    /// This prevents raw video tracks from showing when there's no clip
+    private func fillGapsWithBlackInstructions(
+        instructions: [AVMutableVideoCompositionInstruction],
+        timelineDuration: CMTime
+    ) -> [AVMutableVideoCompositionInstruction] {
+        guard !instructions.isEmpty else {
+            // No clips - create single black instruction for entire duration
+            let blackInstruction = AVMutableVideoCompositionInstruction()
+            blackInstruction.timeRange = CMTimeRange(start: .zero, duration: timelineDuration)
+            blackInstruction.backgroundColor = CGColor(gray: 0, alpha: 1) // Black
+            blackInstruction.layerInstructions = []
+            return [blackInstruction]
+        }
+
+        var result: [AVMutableVideoCompositionInstruction] = []
+        var currentTime = CMTime.zero
+
+        // Sort instructions by start time
+        let sortedInstructions = instructions.sorted { $0.timeRange.start < $1.timeRange.start }
+
+        for instruction in sortedInstructions {
+            // Check for gap before this instruction
+            if CMTimeCompare(currentTime, instruction.timeRange.start) < 0 {
+                // There's a gap - fill with black
+                let gapDuration = CMTimeSubtract(instruction.timeRange.start, currentTime)
+                let blackInstruction = AVMutableVideoCompositionInstruction()
+                blackInstruction.timeRange = CMTimeRange(start: currentTime, duration: gapDuration)
+                blackInstruction.backgroundColor = CGColor(gray: 0, alpha: 1) // Black
+                blackInstruction.layerInstructions = []
+                result.append(blackInstruction)
+            }
+
+            result.append(instruction)
+            currentTime = instruction.timeRange.end
+        }
+
+        // Check for gap after the last instruction until timeline end
+        if CMTimeCompare(currentTime, timelineDuration) < 0 {
+            let gapDuration = CMTimeSubtract(timelineDuration, currentTime)
+            let blackInstruction = AVMutableVideoCompositionInstruction()
+            blackInstruction.timeRange = CMTimeRange(start: currentTime, duration: gapDuration)
+            blackInstruction.backgroundColor = CGColor(gray: 0, alpha: 1) // Black
+            blackInstruction.layerInstructions = []
+            result.append(blackInstruction)
+        }
+
+        return result
+    }
 }
 
 // MARK: - UIColor Hex Extension
 
 extension UIColor {
+    /// Initialize UIColor from hex string (nonisolated for use in actor contexts)
+    @MainActor
+    static func fromHex(_ hex: String) -> UIColor? {
+        var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
+
+        var rgb: UInt64 = 0
+        guard Scanner(string: hexSanitized).scanHexInt64(&rgb) else { return nil }
+
+        let length = hexSanitized.count
+        if length == 6 {
+            return UIColor(
+                red: CGFloat((rgb & 0xFF0000) >> 16) / 255.0,
+                green: CGFloat((rgb & 0x00FF00) >> 8) / 255.0,
+                blue: CGFloat(rgb & 0x0000FF) / 255.0,
+                alpha: 1.0
+            )
+        } else if length == 8 {
+            return UIColor(
+                red: CGFloat((rgb & 0xFF000000) >> 24) / 255.0,
+                green: CGFloat((rgb & 0x00FF0000) >> 16) / 255.0,
+                blue: CGFloat((rgb & 0x0000FF00) >> 8) / 255.0,
+                alpha: CGFloat(rgb & 0x000000FF) / 255.0
+            )
+        } else {
+            return nil
+        }
+    }
+
     convenience init?(hex: String) {
         var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")

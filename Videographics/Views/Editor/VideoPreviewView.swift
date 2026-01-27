@@ -15,9 +15,10 @@ struct VideoPreviewView: View {
                 Color.black
 
                 if let player = viewModel.player, viewModel.playerItem != nil {
-                    // Video player
+                    // Video player - center within available space
                     VideoPlayer(player: player)
                         .aspectRatio(AppConstants.defaultAspectRatio, contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                         .disabled(true) // Disable built-in controls
                 } else {
                     // Empty state

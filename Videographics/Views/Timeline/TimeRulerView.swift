@@ -12,7 +12,7 @@ struct TimeRulerView: View {
     let totalDuration: CMTime
     var onSeek: ((CMTime) -> Void)? = nil
 
-    private let trackLabelWidth: CGFloat = 40.0 // Adjusted for tap alignment
+    private let trackLabelWidth: CGFloat = AppConstants.trackLabelWidth
 
     var body: some View {
         GeometryReader { geometry in

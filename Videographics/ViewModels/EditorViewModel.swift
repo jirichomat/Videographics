@@ -34,8 +34,20 @@ class EditorViewModel {
 
     // MARK: - Timeline
     var pixelsPerSecond: CGFloat = AppConstants.defaultPixelsPerSecond
-    var selectedClip: VideoClip?
-    var currentTool: EditorTool = .navigate
+    var selectedClip: VideoClip? {
+        didSet {
+            if selectedClip?.id != oldValue?.id {
+                ActionLogger.shared.logUIEvent("Clip selection changed", details: selectedClip?.id.uuidString ?? "none")
+            }
+        }
+    }
+    var currentTool: EditorTool = .navigate {
+        didSet {
+            if currentTool != oldValue {
+                ActionLogger.shared.logUIEvent("Tool changed", details: "\(oldValue.rawValue) → \(currentTool.rawValue)")
+            }
+        }
+    }
 
     // MARK: - Import
     var showingMediaPicker = false
@@ -64,6 +76,10 @@ class EditorViewModel {
     var showingInfographicsSheet = false
     var editingInfographicClip: InfographicClip?
 
+    // MARK: - Debug
+    var showingDebugLog = false
+    var showingResetProjectConfirmation = false
+
     // MARK: - Split Confirmation
     var showingSplitConfirmation = false
     var pendingSplitClip: VideoClip?
@@ -90,6 +106,87 @@ class EditorViewModel {
         self.project = project
         setupPlayer()
         setupEditHistory()
+        logProjectState(context: "Project loaded")
+    }
+
+    /// Log comprehensive project state for debugging
+    func logProjectState(context: String) {
+        ActionLogger.shared.logUIEvent("=== PROJECT STATE: \(context) ===")
+        ActionLogger.shared.logUIEvent("Project", details: "name=\(project.name), id=\(project.id)")
+
+        guard let timeline = project.timeline else {
+            ActionLogger.shared.logUIEvent("Timeline", details: "nil - no timeline exists")
+            return
+        }
+
+        let duration = timeline.duration
+        ActionLogger.shared.logUIEvent("Timeline", details: "duration=\(duration.seconds)s, isEmpty=\(timeline.isEmpty)")
+
+        // Log video layers
+        for (index, layer) in timeline.videoLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("VideoLayer[\(index)]", details: "name=\(layer.name), zIndex=\(layer.zIndex), clips=\(layer.clips.count)")
+
+            for (clipIndex, clip) in layer.clips.enumerated() {
+                let startTime = clip.cmTimelineStartTime.seconds
+                let clipDuration = clip.cmDuration.seconds
+                let sourceStart = clip.cmSourceStartTime.seconds
+                let endTime = startTime + clipDuration
+
+                ActionLogger.shared.logUIEvent("  Clip[\(clipIndex)]", details: """
+                    id=\(clip.id.uuidString.prefix(8)), \
+                    timeline=\(String(format: "%.2f", startTime))-\(String(format: "%.2f", endTime))s, \
+                    duration=\(String(format: "%.2f", clipDuration))s, \
+                    sourceStart=\(String(format: "%.2f", sourceStart))s
+                    """)
+                ActionLogger.shared.logUIEvent("    Transform", details: """
+                    sourceSize=\(clip.sourceWidth)x\(clip.sourceHeight), \
+                    scaleMode=\(clip.scaleMode.rawValue), \
+                    scale=\(String(format: "%.2f", clip.scale)), \
+                    position=(\(String(format: "%.2f", clip.positionX)),\(String(format: "%.2f", clip.positionY)))
+                    """)
+                // Log calculated transform matrix
+                let renderSize = CGSize(width: 1080, height: 1920)
+                let transform = clip.calculateTransform(for: renderSize)
+                ActionLogger.shared.logUIEvent("    Matrix", details: """
+                    [a=\(String(format: "%.3f", transform.a)), d=\(String(format: "%.3f", transform.d)), tx=\(String(format: "%.1f", transform.tx)), ty=\(String(format: "%.1f", transform.ty))]
+                    """)
+                // Log raw SwiftData stored values
+                ActionLogger.shared.logUIEvent("    RAW DATA", details: """
+                    timelineStart=\(clip.timelineStartTimeValue)/\(clip.timelineStartTimeScale), \
+                    duration=\(clip.durationValue)/\(clip.durationScale), \
+                    sourceStart=\(clip.sourceStartTimeValue)/\(clip.sourceStartTimeScale), \
+                    originalDur=\(clip.originalDurationValue)/\(clip.originalDurationScale)
+                    """)
+                ActionLogger.shared.logUIEvent("    ASSET", details: clip.assetURLString)
+            }
+        }
+
+        // Log audio layers
+        for (index, layer) in timeline.audioLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("AudioLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+        }
+
+        // Log text layers
+        for (index, layer) in timeline.textLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("TextLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+            for (clipIndex, clip) in layer.clips.enumerated() {
+                ActionLogger.shared.logUIEvent("  TextClip[\(clipIndex)]", details: """
+                    text="\(clip.text.prefix(20))", start=\(clip.cmTimelineStartTime.seconds)s, duration=\(clip.cmDuration.seconds)s
+                    """)
+            }
+        }
+
+        // Log graphics layers
+        for (index, layer) in timeline.graphicsLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("GraphicsLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+        }
+
+        // Log infographic layers
+        for (index, layer) in timeline.infographicLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("InfographicLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+        }
+
+        ActionLogger.shared.logUIEvent("=== END PROJECT STATE ===")
     }
 
     private func setupEditHistory() {
@@ -169,8 +266,10 @@ class EditorViewModel {
     private func addTimeObserver() {
         let interval = CMTime(seconds: 0.05, preferredTimescale: AppConstants.playbackTimescale)
         timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            // Capture self as a constant to avoid Swift 6 concurrency warning
+            let viewModel = self
             Task { @MainActor in
-                self?.currentTime = time
+                viewModel?.currentTime = time
             }
         }
     }
@@ -205,6 +304,8 @@ class EditorViewModel {
     func rebuildComposition() async {
         guard let timeline = project.timeline else { return }
 
+        ActionLogger.shared.logUIEvent("Rebuilding composition...")
+
         let result = await CompositionEngine.shared.buildComposition(from: timeline)
 
         if let result = result {
@@ -213,12 +314,27 @@ class EditorViewModel {
             // Apply video composition for transforms/scaling
             if let videoComposition = result.videoComposition {
                 newItem.videoComposition = videoComposition
+                ActionLogger.shared.logUIEvent("Composition built", details: """
+                    renderSize=\(videoComposition.renderSize), \
+                    instructions=\(videoComposition.instructions.count)
+                    """)
+
+                // Log each instruction's time range
+                for (i, instruction) in videoComposition.instructions.enumerated() {
+                    ActionLogger.shared.logUIEvent("  Instruction[\(i)]", details: """
+                        timeRange=\(instruction.timeRange.start.seconds)-\(instruction.timeRange.end.seconds)s
+                        """)
+                }
+            } else {
+                ActionLogger.shared.logUIEvent("Composition built", details: "No videoComposition created")
             }
 
             await MainActor.run {
                 player?.replaceCurrentItem(with: newItem)
                 playerItem = newItem
             }
+        } else {
+            ActionLogger.shared.logError("Failed to build composition")
         }
     }
 
@@ -540,11 +656,12 @@ class EditorViewModel {
         let frameDuration = CMTime(value: 1, timescale: 30)
 
         // Time for last frame of part 1 (one frame before split)
-        var beforeTime = CMTimeSubtract(sourceTimeAtSplit, frameDuration)
-        // Ensure beforeTime is not negative
-        if CMTimeCompare(beforeTime, .zero) < 0 {
-            beforeTime = .zero
-        }
+        // Use let constant to avoid Swift 6 concurrency warning with async let
+        let beforeTime: CMTime = {
+            let calculated = CMTimeSubtract(sourceTimeAtSplit, frameDuration)
+            // Ensure beforeTime is not negative
+            return CMTimeCompare(calculated, .zero) < 0 ? .zero : calculated
+        }()
 
         // Time for first frame of part 2 (at split point)
         let afterTime = sourceTimeAtSplit
@@ -831,6 +948,9 @@ class EditorViewModel {
     }
 
     func resetUI() {
+        ActionLogger.shared.logUIEvent("Reset UI requested")
+        logProjectState(context: "Before reset")
+
         pause()
         currentTool = .navigate
         selectedClip = nil
@@ -841,6 +961,108 @@ class EditorViewModel {
         showingInfographicsSheet = false
         editingTextClip = nil
         editingInfographicClip = nil
+
+        // Validate and fix clip positions
+        validateAndFixClipPositions()
+
+        // Rebuild composition to ensure video reflects current state
+        Task {
+            await rebuildComposition()
+        }
+
+        logProjectState(context: "After reset")
+    }
+
+    func resetProject() {
+        ActionLogger.shared.logUIEvent("Reset Project requested")
+        logProjectState(context: "Before project reset")
+
+        pause()
+        selectedClip = nil
+        seek(to: .zero)
+
+        // Clear all clips from all layers
+        guard let timeline = project.timeline else { return }
+
+        for layer in timeline.videoLayers {
+            layer.clips.removeAll()
+        }
+
+        for layer in timeline.audioLayers {
+            layer.clips.removeAll()
+        }
+
+        for layer in timeline.textLayers {
+            layer.clips.removeAll()
+        }
+
+        for layer in timeline.graphicsLayers {
+            layer.clips.removeAll()
+        }
+
+        for layer in timeline.infographicLayers {
+            layer.clips.removeAll()
+        }
+
+        // Clear project thumbnail
+        project.thumbnailData = nil
+        project.modifiedAt = Date()
+
+        // Clear edit history
+        editHistory.clear()
+
+        // Rebuild composition (will be empty)
+        Task {
+            await rebuildComposition()
+        }
+
+        logProjectState(context: "After project reset")
+    }
+
+    /// Validate clip positions and fix any issues (e.g., negative start times, overlaps)
+    private func validateAndFixClipPositions() {
+        guard let timeline = project.timeline else { return }
+
+        var fixedCount = 0
+
+        for layer in timeline.videoLayers {
+            // Sort clips by start time
+            let sortedClips = layer.clips.sorted { $0.cmTimelineStartTime < $1.cmTimelineStartTime }
+
+            for clip in sortedClips {
+                // Fix negative start times
+                if clip.cmTimelineStartTime.seconds < 0 {
+                    ActionLogger.shared.logError("Clip has negative start time", details: "id=\(clip.id), start=\(clip.cmTimelineStartTime.seconds)")
+                    clip.setTimelineStartTime(.zero)
+                    fixedCount += 1
+                }
+
+                // Fix invalid duration
+                if clip.cmDuration.seconds <= 0 {
+                    ActionLogger.shared.logError("Clip has invalid duration", details: "id=\(clip.id), duration=\(clip.cmDuration.seconds)")
+                }
+
+                // Fix invalid scale
+                if clip.scale <= 0 || clip.scale > 10 {
+                    ActionLogger.shared.logError("Clip has invalid scale", details: "id=\(clip.id), scale=\(clip.scale)")
+                    clip.scale = 1.0
+                    fixedCount += 1
+                }
+
+                // Fix extreme positions (more than 2x the video size in any direction)
+                let maxPosition: Float = 2.0
+                if abs(clip.positionX) > maxPosition || abs(clip.positionY) > maxPosition {
+                    ActionLogger.shared.logError("Clip has extreme position", details: "id=\(clip.id), position=(\(clip.positionX), \(clip.positionY))")
+                    clip.positionX = 0
+                    clip.positionY = 0
+                    fixedCount += 1
+                }
+            }
+        }
+
+        if fixedCount > 0 {
+            ActionLogger.shared.logUIEvent("Fixed \(fixedCount) clip issues")
+        }
     }
 
     // MARK: - Formatting

@@ -52,6 +52,14 @@ struct TimelineContainerView: View {
                     )
                 }
                 .scrollDisabled(viewModel.currentTool == .move || viewModel.currentTool == .trim)
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    // Track the horizontal scroll offset
+                    geometry.contentOffset.x + geometry.contentInsets.leading
+                } action: { oldValue, newValue in
+                    // Clamp to prevent negative scrolling (scrolling past track labels)
+                    timelineViewModel.scrollOffset = max(0, newValue)
+                }
                 .background(Color(.systemGroupedBackground))
             }
         }
