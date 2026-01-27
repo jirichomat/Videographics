@@ -12,7 +12,12 @@ import SwiftData
 struct VideographicsApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Project.self,
+            Timeline.self,
+            VideoLayer.self,
+            AudioLayer.self,
+            VideoClip.self,
+            AudioClip.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
@@ -25,8 +30,36 @@ struct VideographicsApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
         .modelContainer(sharedModelContainer)
+    }
+}
+
+// MARK: - Root View
+
+struct RootView: View {
+    @Environment(\.modelContext) private var modelContext
+    @StateObject private var sampleProjectService = SampleProjectService()
+
+    var body: some View {
+        Group {
+            if sampleProjectService.setupComplete {
+                if let project = sampleProjectService.createdProject {
+                    // Go directly to editor with the project
+                    NavigationStack {
+                        EditorView(project: project)
+                    }
+                } else {
+                    // Fallback to project list if no project
+                    ProjectListView()
+                }
+            } else {
+                FirstLaunchView(sampleProjectService: sampleProjectService)
+            }
+        }
+        .task {
+            await sampleProjectService.setupSampleProjectIfNeeded(modelContext: modelContext)
+        }
     }
 }
