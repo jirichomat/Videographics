@@ -26,11 +26,20 @@ See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for the complete implemen
 
 Implementation in progress. Phase 10 (Export) completed. Next: Phase 11 (Polish & Optional).
 
+## GitHub Repository
+
+https://github.com/jirichomat/Videographics
+
 ## Workflow Rules
 
 - **Always use TodoWrite** to track tasks when working on features
 - **Mark todos as completed** immediately after finishing each task
 - **Update IMPLEMENTATION_PLAN.md** when completing phases
+- **Commit and push after each successful feature build**:
+  1. Verify the build succeeds (no errors)
+  2. Stage changes: `git add -A`
+  3. Commit with descriptive message
+  4. Push to remote: `git push`
 
 ## Build & Run
 
