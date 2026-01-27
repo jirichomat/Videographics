@@ -43,6 +43,42 @@ struct LayerStackView: View {
                         )
                         .frame(height: AppConstants.audioTrackHeight)
                     }
+
+                    // Text layers
+                    ForEach(timeline.textLayers.sorted(by: { $0.zIndex > $1.zIndex })) { layer in
+                        TextTrackView(
+                            layer: layer,
+                            viewModel: viewModel,
+                            timelineViewModel: timelineViewModel,
+                            scrollOffset: timelineViewModel.scrollOffset,
+                            visibleWidth: visibleWidth
+                        )
+                        .frame(height: AppConstants.overlayTrackHeight)
+                    }
+
+                    // Graphics layers
+                    ForEach(timeline.graphicsLayers.sorted(by: { $0.zIndex > $1.zIndex })) { layer in
+                        GraphicsTrackView(
+                            layer: layer,
+                            viewModel: viewModel,
+                            timelineViewModel: timelineViewModel,
+                            scrollOffset: timelineViewModel.scrollOffset,
+                            visibleWidth: visibleWidth
+                        )
+                        .frame(height: AppConstants.overlayTrackHeight)
+                    }
+
+                    // Infographic layers
+                    ForEach(timeline.infographicLayers.sorted(by: { $0.zIndex > $1.zIndex })) { layer in
+                        InfographicTrackView(
+                            layer: layer,
+                            viewModel: viewModel,
+                            timelineViewModel: timelineViewModel,
+                            scrollOffset: timelineViewModel.scrollOffset,
+                            visibleWidth: visibleWidth
+                        )
+                        .frame(height: AppConstants.overlayTrackHeight)
+                    }
                 }
             }
             .padding(.vertical, 8)

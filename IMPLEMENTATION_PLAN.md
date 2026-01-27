@@ -525,3 +525,163 @@ enum TransitionType: String, Codable {
 |------|--------|
 | `Item.swift` | Replace with new models |
 | `ContentView.swift` | Replace with ProjectListView |
+
+---
+
+## Future Feature Phases
+
+### Phase 12: Complete Text & Graphics UI (P1)
+
+*Building on existing text/graphics foundation*
+
+| ID | Title | Priority | Status |
+|----|-------|----------|--------|
+| TEXT-UI-001 | Text/Graphics tracks in timeline | P1 | Pending |
+| TEXT-UI-002 | Drag/trim text clips in timeline | P1 | Pending |
+| TEXT-UI-003 | Text animation presets | P2 | Pending |
+| TEXT-UI-004 | Live preview during editing | P2 | Pending |
+| GFX-UI-001 | Graphics editor sheet | P1 | Pending |
+| GFX-UI-002 | Sticker library (bundled assets) | P3 | Pending |
+| UNDO-001 | Undo/redo for text & graphics | P1 | Pending |
+
+---
+
+### Phase 13: JSON Infographics (Killer Feature)
+
+*Turn JSON data into animated charts for social media*
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| INFOG-001 | ChartData model with JSON parsing | P1 | Define chart types |
+| INFOG-002 | ChartRenderer with Core Animation | P1 | Bar, pie, line charts |
+| INFOG-003 | InfographicsSheet UI | P1 | JSON input, preview |
+| INFOG-004 | Chart type picker & style presets | P1 | TikTok, Instagram styles |
+| INFOG-005 | Animation configurations | P2 | Staggered, counting, etc. |
+| INFOG-006 | InfographicClip integration | P1 | Insert into timeline |
+
+**Supported Chart Types:**
+- Bar Charts (animated bars, counting numbers)
+- Pie/Donut Charts (segment animation)
+- Line Charts (drawing animation)
+- Stat Cards (big numbers with labels)
+- Progress Bars (filling animation)
+- Ranking Lists (animated reveals)
+
+**Style Presets:**
+| Style | Look | Best For |
+|-------|------|----------|
+| `tiktok-neon` | Dark bg, neon colors, bold | TikTok engagement |
+| `instagram-clean` | White bg, minimal, elegant | IG carousels |
+| `story-gradient` | Gradient bg, rounded, soft | Stories |
+| `youtube-pro` | Professional, data-focused | YouTube Shorts |
+
+---
+
+### Phase 14: AI Background Removal (Killer Feature)
+
+*One-tap remove/replace video backgrounds using on-device AI*
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| BGREM-001 | BackgroundRemovalService (Vision) | P1 | VNGeneratePersonSegmentationRequest |
+| BGREM-002 | BackgroundEffect model | P1 | Replacement options |
+| BGREM-003 | BackgroundRemovalSheet UI | P1 | Options interface |
+| BGREM-004 | Video composition integration | P1 | Apply to clips |
+| BGREM-005 | Real-time preview | P2 | Live preview |
+
+**Background Replacement Options:**
+- Transparent (ProRes 4444)
+- Solid Color
+- Blur (Gaussian)
+- Image
+- Video
+- Gradient
+
+---
+
+### Phase 15: Music/Beat Sync (Killer Feature)
+
+*Auto-detect beats and sync cuts to rhythm*
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| BEAT-001 | BeatDetectionService (Accelerate) | P1 | Audio analysis |
+| BEAT-002 | BeatMarker model | P1 | Time + strength data |
+| BEAT-003 | Beat markers on timeline | P1 | Visual indicators |
+| BEAT-004 | Snap-to-beat editing | P2 | Clips snap to beats |
+| BEAT-005 | AutoMontageSheet UI | P2 | Auto-cut generator |
+
+---
+
+### Phase 16: Speed Control
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| SPEED-001 | Playback speed property (0.25x-4x) | P1 | Add to VideoClip |
+| SPEED-002 | Speed change in timeline | P1 | Modify time ranges |
+| SPEED-003 | Speed ramping (keyframes) | P2 | Variable speed |
+| SPEED-004 | Reverse playback | P2 | Negative speed |
+
+---
+
+### Phase 17: Auto-Captions (On-Device)
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| CAPTION-001 | SpeechRecognitionService | P1 | Apple Speech framework |
+| CAPTION-002 | CaptionClip model | P1 | Word-level timestamps |
+| CAPTION-003 | Caption timing sync | P1 | Accurate sync |
+| CAPTION-004 | Caption styles (TikTok, etc.) | P2 | Animated presets |
+| CAPTION-005 | CaptionEditorSheet UI | P1 | Edit transcription |
+
+**Caption Styles:**
+- Classic (static bottom text)
+- TikTok (animated word-by-word)
+- Karaoke (highlight as spoken)
+- Minimal (clean sans-serif)
+
+---
+
+### Phase 18: Filters & Color Grading
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| FILTER-001 | VideoFilter model | P1 | Filter definitions |
+| FILTER-002 | Basic color controls | P1 | Brightness, contrast, saturation |
+| FILTER-003 | Temperature & tint | P2 | White balance |
+| FILTER-004 | Filter presets | P1 | Instagram-style looks |
+| FILTER-005 | Custom AVVideoCompositor | P2 | Real-time preview |
+| FILTER-006 | LUT support | P3 | Import color LUTs |
+
+---
+
+### Phase 19: Keyframe Animations
+
+| ID | Title | Priority | Notes |
+|----|-------|----------|-------|
+| KEYFRAME-001 | Keyframe data model | P1 | Time-value pairs |
+| KEYFRAME-002 | Position keyframes | P2 | Pan & zoom |
+| KEYFRAME-003 | Scale/rotation keyframes | P2 | Ken Burns effects |
+| KEYFRAME-004 | Opacity keyframes | P2 | Fade effects |
+| KEYFRAME-005 | Keyframe UI in inspector | P2 | Visual editor |
+
+**Interpolation Types:**
+- Linear
+- Ease-in
+- Ease-out
+- Bezier
+
+---
+
+## Priority Order Summary
+
+| Phase | Feature | Complexity | Status |
+|-------|---------|-----------|--------|
+| 12 | Complete Text & Graphics UI | Medium | **Next** |
+| 13 | JSON Infographics | High | Planned |
+| 14 | AI Background Removal | High | Planned |
+| 15 | Music/Beat Sync | High | Planned |
+| 16 | Speed Control | Medium | Planned |
+| 17 | Auto-Captions | High | Planned |
+| 18 | Filters | High | Planned |
+| 19 | Keyframe Animations | High | Future |

@@ -23,12 +23,16 @@ final class Timeline {
     @Relationship(deleteRule: .cascade, inverse: \GraphicsLayer.timeline)
     var graphicsLayers: [GraphicsLayer]
 
+    @Relationship(deleteRule: .cascade, inverse: \InfographicLayer.timeline)
+    var infographicLayers: [InfographicLayer]
+
     init() {
         self.id = UUID()
         self.videoLayers = []
         self.audioLayers = []
         self.textLayers = []
         self.graphicsLayers = []
+        self.infographicLayers = []
 
         // Create default layers
         let mainVideoLayer = VideoLayer(name: "V1", zIndex: 0)
@@ -36,12 +40,14 @@ final class Timeline {
         let mainAudioLayer = AudioLayer(name: "Audio", zIndex: -1)
         let textLayer = TextLayer(name: "Text", zIndex: 100)
         let graphicsLayer = GraphicsLayer(name: "Graphics", zIndex: 101)
+        let infographicLayer = InfographicLayer(name: "Infographic", zIndex: 102)
 
         self.videoLayers.append(mainVideoLayer)
         self.videoLayers.append(pipVideoLayer)
         self.audioLayers.append(mainAudioLayer)
         self.textLayers.append(textLayer)
         self.graphicsLayers.append(graphicsLayer)
+        self.infographicLayers.append(infographicLayer)
     }
 
     var duration: CMTime {
@@ -75,6 +81,15 @@ final class Timeline {
         }
 
         for layer in graphicsLayers {
+            for clip in layer.clips {
+                let clipEnd = CMTimeAdd(clip.cmTimelineStartTime, clip.cmDuration)
+                if CMTimeCompare(clipEnd, maxDuration) > 0 {
+                    maxDuration = clipEnd
+                }
+            }
+        }
+
+        for layer in infographicLayers {
             for clip in layer.clips {
                 let clipEnd = CMTimeAdd(clip.cmTimelineStartTime, clip.cmDuration)
                 if CMTimeCompare(clipEnd, maxDuration) > 0 {
@@ -134,5 +149,16 @@ final class Timeline {
 
     var mainGraphicsLayer: GraphicsLayer? {
         graphicsLayers.first
+    }
+
+    var mainInfographicLayer: InfographicLayer? {
+        infographicLayers.first
+    }
+
+    func addInfographicLayer(name: String) -> InfographicLayer {
+        let maxZIndex = infographicLayers.map { $0.zIndex }.max() ?? 102
+        let layer = InfographicLayer(name: name, zIndex: maxZIndex + 1)
+        infographicLayers.append(layer)
+        return layer
     }
 }

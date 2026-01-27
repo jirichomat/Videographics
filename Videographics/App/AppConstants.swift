@@ -30,6 +30,9 @@ enum AppConstants {
     static let videoTrackHeight: CGFloat = 60.0
     static let audioTrackHeight: CGFloat = 40.0
     static let textTrackHeight: CGFloat = 40.0
+    static let graphicsTrackHeight: CGFloat = 40.0
+    static let infographicTrackHeight: CGFloat = 40.0
+    static let overlayTrackHeight: CGFloat = 40.0
 
     // MARK: - UI
     static let timeRulerHeight: CGFloat = 30.0

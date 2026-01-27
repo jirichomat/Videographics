@@ -60,6 +60,10 @@ class EditorViewModel {
     var showingGraphicsPicker = false
     var selectedGraphicsItem: PhotosPickerItem?
 
+    // MARK: - Infographics
+    var showingInfographicsSheet = false
+    var editingInfographicClip: InfographicClip?
+
     // MARK: - Split Confirmation
     var showingSplitConfirmation = false
     var pendingSplitClip: VideoClip?
@@ -950,6 +954,72 @@ class EditorViewModel {
     }
 
     func deleteGraphicsClip(_ clip: GraphicsClip) {
+        guard let layer = clip.layer else { return }
+        layer.removeClip(clip)
+        project.modifiedAt = Date()
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    // MARK: - Infographics Operations
+
+    func addInfographic() {
+        editingInfographicClip = nil
+        showingInfographicsSheet = true
+    }
+
+    func editInfographicClip(_ clip: InfographicClip) {
+        editingInfographicClip = clip
+        showingInfographicsSheet = true
+    }
+
+    func saveInfographicClip(
+        chartType: InfographicChartType,
+        stylePreset: InfographicStylePreset,
+        chartData: ChartData,
+        positionX: Float,
+        positionY: Float,
+        scale: Float
+    ) {
+        if let existingClip = editingInfographicClip {
+            // Update existing clip
+            existingClip.chartType = chartType
+            existingClip.stylePreset = stylePreset
+            existingClip.chartData = chartData
+            existingClip.positionX = positionX
+            existingClip.positionY = positionY
+            existingClip.scale = scale
+        } else {
+            // Create new infographic clip
+            let infographicClip = InfographicClip(
+                chartType: chartType,
+                stylePreset: stylePreset,
+                chartData: chartData,
+                timelineStartTime: currentTime,
+                duration: CMTime(seconds: 5.0, preferredTimescale: 600),
+                positionX: positionX,
+                positionY: positionY,
+                scale: scale
+            )
+
+            // Add to main infographic layer
+            if let infographicLayer = project.timeline?.mainInfographicLayer {
+                infographicLayer.addClip(infographicClip)
+            }
+        }
+
+        project.modifiedAt = Date()
+        editingInfographicClip = nil
+        showingInfographicsSheet = false
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    func deleteInfographicClip(_ clip: InfographicClip) {
         guard let layer = clip.layer else { return }
         layer.removeClip(clip)
         project.modifiedAt = Date()

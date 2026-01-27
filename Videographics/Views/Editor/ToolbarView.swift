@@ -38,6 +38,12 @@ struct ToolbarView: View {
                     } label: {
                         Label("Image/Sticker", systemImage: "photo")
                     }
+
+                    Button {
+                        viewModel.addInfographic()
+                    } label: {
+                        Label("Infographic", systemImage: "chart.bar.fill")
+                    }
                 }
             } label: {
                 VStack(spacing: 2) {

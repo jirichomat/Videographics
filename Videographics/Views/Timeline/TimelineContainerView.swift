@@ -60,9 +60,15 @@ struct TimelineContainerView: View {
     private var timelineHeight: CGFloat {
         let videoLayerCount = CGFloat(viewModel.project.timeline?.videoLayers.count ?? 1)
         let audioLayerCount = CGFloat(viewModel.project.timeline?.audioLayers.count ?? 1)
+        let textLayerCount = CGFloat(viewModel.project.timeline?.textLayers.count ?? 0)
+        let graphicsLayerCount = CGFloat(viewModel.project.timeline?.graphicsLayers.count ?? 0)
+        let infographicLayerCount = CGFloat(viewModel.project.timeline?.infographicLayers.count ?? 0)
 
         return (videoLayerCount * AppConstants.videoTrackHeight) +
                (audioLayerCount * AppConstants.audioTrackHeight) +
+               (textLayerCount * AppConstants.overlayTrackHeight) +
+               (graphicsLayerCount * AppConstants.overlayTrackHeight) +
+               (infographicLayerCount * AppConstants.overlayTrackHeight) +
                16 // Padding
     }
 }

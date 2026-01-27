@@ -319,7 +319,7 @@ actor CompositionEngine {
 
     // MARK: - Text and Graphics Overlays
 
-    /// Build overlay layers for text and graphics
+    /// Build overlay layers for text, graphics, and infographics
     private func buildOverlayLayers(
         timeline: Timeline,
         renderSize: CGSize,
@@ -327,8 +327,9 @@ actor CompositionEngine {
     ) -> AVVideoCompositionCoreAnimationTool? {
         let hasTextOverlays = timeline.textLayers.contains { !$0.clips.isEmpty && $0.isVisible }
         let hasGraphicsOverlays = timeline.graphicsLayers.contains { !$0.clips.isEmpty && $0.isVisible }
+        let hasInfographicOverlays = timeline.infographicLayers.contains { !$0.clips.isEmpty && $0.isVisible }
 
-        guard hasTextOverlays || hasGraphicsOverlays else { return nil }
+        guard hasTextOverlays || hasGraphicsOverlays || hasInfographicOverlays else { return nil }
 
         // Parent layer that contains everything
         let parentLayer = CALayer()
@@ -360,6 +361,19 @@ actor CompositionEngine {
         for graphicsLayer in sortedGraphicsLayers {
             for clip in graphicsLayer.sortedClips {
                 if let layer = createGraphicsLayer(from: clip, renderSize: renderSize, duration: duration) {
+                    parentLayer.addSublayer(layer)
+                }
+            }
+        }
+
+        // Add infographic layers
+        let sortedInfographicLayers = timeline.infographicLayers
+            .filter { $0.isVisible }
+            .sorted { $0.zIndex < $1.zIndex }
+
+        for infographicLayer in sortedInfographicLayers {
+            for clip in infographicLayer.sortedClips {
+                if let layer = createInfographicLayer(from: clip, renderSize: renderSize, duration: duration) {
                     parentLayer.addSublayer(layer)
                 }
             }
@@ -490,8 +504,95 @@ actor CompositionEngine {
         return imageLayer
     }
 
+    /// Create a CALayer for an infographic clip
+    private nonisolated func createInfographicLayer(
+        from clip: InfographicClip,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> CALayer? {
+        guard let chartData = clip.chartData else { return nil }
+
+        // Render the chart to an image on main thread
+        let chartSize = CGSize(
+            width: renderSize.width * 0.8,
+            height: renderSize.height * 0.4
+        )
+
+        // Capture clip properties for main thread
+        let chartType = clip.chartType
+        let stylePreset = clip.stylePreset
+        let clipScale = clip.scale
+        let positionX = clip.positionX
+        let positionY = clip.positionY
+        let rotation = clip.rotation
+        let opacity = clip.opacity
+        let startTime = clip.cmTimelineStartTime
+        let endTime = clip.cmTimelineEndTime
+
+        var chartImage: UIImage?
+
+        // Render chart on main thread synchronously
+        if Thread.isMainThread {
+            chartImage = MainActor.assumeIsolated {
+                ChartRenderer.shared.renderChart(
+                    data: chartData,
+                    chartType: chartType,
+                    style: stylePreset,
+                    size: chartSize
+                )
+            }
+        } else {
+            DispatchQueue.main.sync {
+                chartImage = MainActor.assumeIsolated {
+                    ChartRenderer.shared.renderChart(
+                        data: chartData,
+                        chartType: chartType,
+                        style: stylePreset,
+                        size: chartSize
+                    )
+                }
+            }
+        }
+
+        guard let image = chartImage, let cgImage = image.cgImage else { return nil }
+
+        let imageLayer = CALayer()
+        imageLayer.contents = cgImage
+        imageLayer.contentsGravity = .resizeAspect
+
+        // Calculate size with scale
+        let scaledSize = CGSize(
+            width: chartSize.width * CGFloat(clipScale),
+            height: chartSize.height * CGFloat(clipScale)
+        )
+        imageLayer.bounds = CGRect(origin: .zero, size: scaledSize)
+
+        // Position (convert from normalized -1 to 1 to actual coordinates)
+        let centerX = renderSize.width / 2 + CGFloat(positionX) * (renderSize.width / 2)
+        let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2)
+        imageLayer.position = CGPoint(x: centerX, y: centerY)
+
+        // Rotation and opacity
+        var transform = CATransform3DIdentity
+        if rotation != 0 {
+            transform = CATransform3DRotate(transform, CGFloat(rotation) * .pi / 180, 0, 0, 1)
+        }
+        imageLayer.transform = transform
+        imageLayer.opacity = opacity
+
+        // Animate visibility
+        addVisibilityAnimation(
+            to: imageLayer,
+            startTime: startTime,
+            endTime: endTime,
+            duration: duration
+        )
+
+        return imageLayer
+    }
+
     /// Add visibility animation to show layer only during clip duration
-    private func addVisibilityAnimation(
+    private nonisolated func addVisibilityAnimation(
         to layer: CALayer,
         startTime: CMTime,
         endTime: CMTime,

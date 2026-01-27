@@ -121,6 +121,9 @@ struct EditorView: View {
         .sheet(isPresented: $viewModel.showingTextEditor) {
             TextEditorSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showingInfographicsSheet) {
+            InfographicsSheet(viewModel: viewModel)
+        }
         .photosPicker(
             isPresented: $viewModel.showingGraphicsPicker,
             selection: $viewModel.selectedGraphicsItem,
