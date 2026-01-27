@@ -830,6 +830,19 @@ class EditorViewModel {
         pixelsPerSecond = max(pixelsPerSecond / 1.5, AppConstants.minPixelsPerSecond)
     }
 
+    func resetUI() {
+        pause()
+        currentTool = .navigate
+        selectedClip = nil
+        pixelsPerSecond = AppConstants.defaultPixelsPerSecond
+        seek(to: .zero)
+        showingInspector = false
+        showingTextEditor = false
+        showingInfographicsSheet = false
+        editingTextClip = nil
+        editingInfographicClip = nil
+    }
+
     // MARK: - Formatting
 
     var formattedCurrentTime: String {

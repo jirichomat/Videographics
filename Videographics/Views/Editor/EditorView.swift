@@ -73,6 +73,17 @@ struct EditorView: View {
                     Image(systemName: "square.and.arrow.up")
                 }
                 .disabled(project.timeline?.isEmpty ?? true)
+
+                // More options menu
+                Menu {
+                    Button {
+                        viewModel.resetUI()
+                    } label: {
+                        Label("Reset UI", systemImage: "arrow.counterclockwise")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
             }
         }
         .photosPicker(
