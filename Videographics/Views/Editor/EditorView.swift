@@ -118,6 +118,22 @@ struct EditorView: View {
         .sheet(isPresented: $viewModel.showingInspector) {
             InspectorView(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showingTextEditor) {
+            TextEditorSheet(viewModel: viewModel)
+        }
+        .photosPicker(
+            isPresented: $viewModel.showingGraphicsPicker,
+            selection: $viewModel.selectedGraphicsItem,
+            matching: .images,
+            photoLibrary: .shared()
+        )
+        .onChange(of: viewModel.selectedGraphicsItem) { _, newValue in
+            if newValue != nil {
+                Task {
+                    await viewModel.importGraphics()
+                }
+            }
+        }
         .task {
             await viewModel.rebuildComposition()
         }

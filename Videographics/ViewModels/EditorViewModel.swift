@@ -9,6 +9,7 @@ import SwiftData
 import AVFoundation
 import CoreMedia
 import PhotosUI
+import UIKit
 
 enum EditorTool: String, CaseIterable {
     case navigate = "Navigate"
@@ -50,6 +51,14 @@ class EditorViewModel {
 
     // MARK: - Inspector
     var showingInspector = false
+
+    // MARK: - Text Overlays
+    var showingTextEditor = false
+    var editingTextClip: TextClip?
+
+    // MARK: - Graphics
+    var showingGraphicsPicker = false
+    var selectedGraphicsItem: PhotosPickerItem?
 
     // MARK: - Split Confirmation
     var showingSplitConfirmation = false
@@ -826,5 +835,127 @@ class EditorViewModel {
         let secs = Int(seconds) % 60
         let frames = Int((seconds.truncatingRemainder(dividingBy: 1)) * 30)
         return String(format: "%d:%02d:%02d", minutes, secs, frames)
+    }
+
+    // MARK: - Text Overlay Operations
+
+    func addTextOverlay() {
+        editingTextClip = nil
+        showingTextEditor = true
+    }
+
+    func editTextClip(_ clip: TextClip) {
+        editingTextClip = clip
+        showingTextEditor = true
+    }
+
+    func saveTextClip(
+        text: String,
+        fontName: String,
+        fontSize: Float,
+        textColorHex: String,
+        alignment: TextClipAlignment,
+        positionX: Float,
+        positionY: Float
+    ) {
+        if let existingClip = editingTextClip {
+            // Update existing clip
+            existingClip.text = text
+            existingClip.fontName = fontName
+            existingClip.fontSize = fontSize
+            existingClip.textColorHex = textColorHex
+            existingClip.alignment = alignment
+            existingClip.positionX = positionX
+            existingClip.positionY = positionY
+        } else {
+            // Create new text clip
+            let textClip = TextClip(
+                text: text,
+                timelineStartTime: currentTime,
+                duration: CMTime(seconds: 5.0, preferredTimescale: 600),
+                fontName: fontName,
+                fontSize: fontSize,
+                textColor: textColorHex,
+                alignment: alignment,
+                positionX: positionX,
+                positionY: positionY
+            )
+
+            // Add to main text layer
+            if let textLayer = project.timeline?.mainTextLayer {
+                textLayer.addClip(textClip)
+            }
+        }
+
+        project.modifiedAt = Date()
+        editingTextClip = nil
+        showingTextEditor = false
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    func deleteTextClip(_ clip: TextClip) {
+        guard let layer = clip.layer else { return }
+        layer.removeClip(clip)
+        project.modifiedAt = Date()
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    // MARK: - Graphics Operations
+
+    func addGraphicsOverlay() {
+        showingGraphicsPicker = true
+    }
+
+    func importGraphics() async {
+        guard let item = selectedGraphicsItem else { return }
+
+        do {
+            // Load image data
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                return
+            }
+
+            guard let image = UIImage(data: data) else {
+                return
+            }
+
+            // Create graphics clip
+            let graphicsClip = GraphicsClip(
+                imageData: data,
+                timelineStartTime: currentTime,
+                duration: CMTime(seconds: 5.0, preferredTimescale: 600),
+                sourceSize: image.size
+            )
+
+            // Add to main graphics layer
+            if let graphicsLayer = project.timeline?.mainGraphicsLayer {
+                graphicsLayer.addClip(graphicsClip)
+            }
+
+            project.modifiedAt = Date()
+            selectedGraphicsItem = nil
+            showingGraphicsPicker = false
+
+            await rebuildComposition()
+
+        } catch {
+            print("Failed to import graphics: \(error)")
+        }
+    }
+
+    func deleteGraphicsClip(_ clip: GraphicsClip) {
+        guard let layer = clip.layer else { return }
+        layer.removeClip(clip)
+        project.modifiedAt = Date()
+
+        Task {
+            await rebuildComposition()
+        }
     }
 }

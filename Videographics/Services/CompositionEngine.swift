@@ -6,6 +6,8 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import UIKit
+import QuartzCore
 
 /// Holds composition build result with both composition and video composition
 struct CompositionResult {
@@ -75,11 +77,12 @@ actor CompositionEngine {
             }
         }
 
-        // Build video composition with transforms
+        // Build video composition with transforms and overlays
         let videoComposition = buildVideoComposition(
             for: composition,
             clipInfos: clipInfos,
-            renderSize: renderSize
+            renderSize: renderSize,
+            timeline: timeline
         )
 
         return CompositionResult(composition: composition, videoComposition: videoComposition)
@@ -192,7 +195,8 @@ actor CompositionEngine {
     private func buildVideoComposition(
         for composition: AVMutableComposition,
         clipInfos: [ClipTrackInfo],
-        renderSize: CGSize
+        renderSize: CGSize,
+        timeline: Timeline
     ) -> AVMutableVideoComposition? {
         guard !clipInfos.isEmpty else { return nil }
 
@@ -299,7 +303,255 @@ actor CompositionEngine {
 
         videoComposition.instructions = instructions
 
+        // Add text and graphics overlays using Core Animation
+        let timelineDuration = timeline.duration
+        let animationTool = buildOverlayLayers(
+            timeline: timeline,
+            renderSize: renderSize,
+            duration: timelineDuration
+        )
+        if let tool = animationTool {
+            videoComposition.animationTool = tool
+        }
+
         return videoComposition
+    }
+
+    // MARK: - Text and Graphics Overlays
+
+    /// Build overlay layers for text and graphics
+    private func buildOverlayLayers(
+        timeline: Timeline,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> AVVideoCompositionCoreAnimationTool? {
+        let hasTextOverlays = timeline.textLayers.contains { !$0.clips.isEmpty && $0.isVisible }
+        let hasGraphicsOverlays = timeline.graphicsLayers.contains { !$0.clips.isEmpty && $0.isVisible }
+
+        guard hasTextOverlays || hasGraphicsOverlays else { return nil }
+
+        // Parent layer that contains everything
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: renderSize)
+
+        // Video layer where video will be rendered
+        let videoLayer = CALayer()
+        videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+        parentLayer.addSublayer(videoLayer)
+
+        // Add text layers (higher zIndex = on top)
+        let sortedTextLayers = timeline.textLayers
+            .filter { $0.isVisible }
+            .sorted { $0.zIndex < $1.zIndex }
+
+        for textLayer in sortedTextLayers {
+            for clip in textLayer.sortedClips {
+                if let layer = createTextLayer(from: clip, renderSize: renderSize, duration: duration) {
+                    parentLayer.addSublayer(layer)
+                }
+            }
+        }
+
+        // Add graphics layers
+        let sortedGraphicsLayers = timeline.graphicsLayers
+            .filter { $0.isVisible }
+            .sorted { $0.zIndex < $1.zIndex }
+
+        for graphicsLayer in sortedGraphicsLayers {
+            for clip in graphicsLayer.sortedClips {
+                if let layer = createGraphicsLayer(from: clip, renderSize: renderSize, duration: duration) {
+                    parentLayer.addSublayer(layer)
+                }
+            }
+        }
+
+        return AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
+    }
+
+    /// Create a CATextLayer for a text clip
+    private func createTextLayer(
+        from clip: TextClip,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> CALayer? {
+        let textLayer = CATextLayer()
+
+        // Set text content and styling
+        textLayer.string = clip.text
+        textLayer.font = CTFontCreateWithName(clip.fontName as CFString, CGFloat(clip.fontSize), nil)
+        textLayer.fontSize = CGFloat(clip.fontSize) * CGFloat(clip.scale)
+        textLayer.foregroundColor = UIColor(hex: clip.textColorHex)?.cgColor ?? UIColor.white.cgColor
+
+        // Background color
+        if let bgHex = clip.backgroundColorHex {
+            textLayer.backgroundColor = UIColor(hex: bgHex)?.cgColor
+        }
+
+        // Alignment
+        switch clip.alignment {
+        case .left:
+            textLayer.alignmentMode = .left
+        case .center:
+            textLayer.alignmentMode = .center
+        case .right:
+            textLayer.alignmentMode = .right
+        }
+
+        textLayer.isWrapped = true
+        textLayer.truncationMode = .none
+        textLayer.contentsScale = UIScreen.main.scale
+
+        // Calculate size based on text
+        let maxWidth = renderSize.width * 0.9
+        let textSize = calculateTextSize(
+            text: clip.text,
+            fontName: clip.fontName,
+            fontSize: CGFloat(clip.fontSize) * CGFloat(clip.scale),
+            maxWidth: maxWidth
+        )
+
+        textLayer.bounds = CGRect(origin: .zero, size: textSize)
+
+        // Position (convert from normalized -1 to 1 to actual coordinates)
+        // In Core Animation, origin is bottom-left
+        let centerX = renderSize.width / 2 + CGFloat(clip.positionX) * (renderSize.width / 2)
+        let centerY = renderSize.height / 2 + CGFloat(clip.positionY) * (renderSize.height / 2)
+        textLayer.position = CGPoint(x: centerX, y: centerY)
+
+        // Rotation
+        if clip.rotation != 0 {
+            textLayer.transform = CATransform3DMakeRotation(CGFloat(clip.rotation) * .pi / 180, 0, 0, 1)
+        }
+
+        // Animate visibility (show/hide based on clip timing)
+        addVisibilityAnimation(
+            to: textLayer,
+            startTime: clip.cmTimelineStartTime,
+            endTime: clip.cmTimelineEndTime,
+            duration: duration
+        )
+
+        return textLayer
+    }
+
+    /// Create a CALayer for a graphics clip
+    private func createGraphicsLayer(
+        from clip: GraphicsClip,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> CALayer? {
+        // Load image from data or URL
+        var image: UIImage?
+
+        if let imageData = clip.imageData {
+            image = UIImage(data: imageData)
+        } else if let imageURL = clip.imageURL,
+                  let data = try? Data(contentsOf: imageURL) {
+            image = UIImage(data: data)
+        }
+
+        guard let cgImage = image?.cgImage else { return nil }
+
+        let imageLayer = CALayer()
+        imageLayer.contents = cgImage
+        imageLayer.contentsGravity = .resizeAspect
+
+        // Calculate size
+        let imageSize = CGSize(
+            width: CGFloat(clip.sourceWidth) * CGFloat(clip.scale),
+            height: CGFloat(clip.sourceHeight) * CGFloat(clip.scale)
+        )
+        imageLayer.bounds = CGRect(origin: .zero, size: imageSize)
+
+        // Position (convert from normalized -1 to 1 to actual coordinates)
+        let centerX = renderSize.width / 2 + CGFloat(clip.positionX) * (renderSize.width / 2)
+        let centerY = renderSize.height / 2 + CGFloat(clip.positionY) * (renderSize.height / 2)
+        imageLayer.position = CGPoint(x: centerX, y: centerY)
+
+        // Rotation and opacity
+        var transform = CATransform3DIdentity
+        if clip.rotation != 0 {
+            transform = CATransform3DRotate(transform, CGFloat(clip.rotation) * .pi / 180, 0, 0, 1)
+        }
+        imageLayer.transform = transform
+        imageLayer.opacity = clip.opacity
+
+        // Animate visibility
+        addVisibilityAnimation(
+            to: imageLayer,
+            startTime: clip.cmTimelineStartTime,
+            endTime: clip.cmTimelineEndTime,
+            duration: duration
+        )
+
+        return imageLayer
+    }
+
+    /// Add visibility animation to show layer only during clip duration
+    private func addVisibilityAnimation(
+        to layer: CALayer,
+        startTime: CMTime,
+        endTime: CMTime,
+        duration: CMTime
+    ) {
+        let startSeconds = CMTimeGetSeconds(startTime)
+        let endSeconds = CMTimeGetSeconds(endTime)
+        let totalSeconds = CMTimeGetSeconds(duration)
+
+        // Initially hidden
+        layer.opacity = 0
+
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.calculationMode = .discrete
+        animation.isRemovedOnCompletion = false
+        animation.fillMode = .forwards
+        animation.beginTime = AVCoreAnimationBeginTimeAtZero
+        animation.duration = totalSeconds
+
+        // Build keyframe times and values
+        var times: [NSNumber] = []
+        var values: [NSNumber] = []
+
+        // Before start: hidden
+        if startSeconds > 0 {
+            times.append(0)
+            values.append(0)
+        }
+
+        // At start: visible
+        times.append(NSNumber(value: startSeconds / totalSeconds))
+        values.append(1)
+
+        // At end: hidden
+        times.append(NSNumber(value: endSeconds / totalSeconds))
+        values.append(0)
+
+        animation.keyTimes = times
+        animation.values = values
+
+        layer.add(animation, forKey: "visibilityAnimation")
+    }
+
+    /// Calculate the size needed for text
+    private func calculateTextSize(text: String, fontName: String, fontSize: CGFloat, maxWidth: CGFloat) -> CGSize {
+        let font = UIFont(name: fontName, size: fontSize) ?? UIFont.systemFont(ofSize: fontSize)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+
+        let boundingRect = (text as NSString).boundingRect(
+            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes,
+            context: nil
+        )
+
+        // Add some padding
+        return CGSize(
+            width: ceil(boundingRect.width) + 20,
+            height: ceil(boundingRect.height) + 10
+        )
     }
 
     /// Apply transition effect to a layer instruction
@@ -399,6 +651,37 @@ actor CompositionEngine {
             } else {
                 toInstruction.setOpacityRamp(fromStartOpacity: 0.0, toEndOpacity: 1.0, timeRange: CMTimeRange(start: startTime, duration: duration))
             }
+        }
+    }
+}
+
+// MARK: - UIColor Hex Extension
+
+extension UIColor {
+    convenience init?(hex: String) {
+        var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        hexSanitized = hexSanitized.replacingOccurrences(of: "#", with: "")
+
+        var rgb: UInt64 = 0
+        guard Scanner(string: hexSanitized).scanHexInt64(&rgb) else { return nil }
+
+        let length = hexSanitized.count
+        if length == 6 {
+            self.init(
+                red: CGFloat((rgb & 0xFF0000) >> 16) / 255.0,
+                green: CGFloat((rgb & 0x00FF00) >> 8) / 255.0,
+                blue: CGFloat(rgb & 0x0000FF) / 255.0,
+                alpha: 1.0
+            )
+        } else if length == 8 {
+            self.init(
+                red: CGFloat((rgb & 0xFF000000) >> 24) / 255.0,
+                green: CGFloat((rgb & 0x00FF0000) >> 16) / 255.0,
+                blue: CGFloat((rgb & 0x0000FF00) >> 8) / 255.0,
+                alpha: CGFloat(rgb & 0x000000FF) / 255.0
+            )
+        } else {
+            return nil
         }
     }
 }

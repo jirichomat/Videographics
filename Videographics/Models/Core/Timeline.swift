@@ -17,19 +17,31 @@ final class Timeline {
     @Relationship(deleteRule: .cascade, inverse: \AudioLayer.timeline)
     var audioLayers: [AudioLayer]
 
+    @Relationship(deleteRule: .cascade, inverse: \TextLayer.timeline)
+    var textLayers: [TextLayer]
+
+    @Relationship(deleteRule: .cascade, inverse: \GraphicsLayer.timeline)
+    var graphicsLayers: [GraphicsLayer]
+
     init() {
         self.id = UUID()
         self.videoLayers = []
         self.audioLayers = []
+        self.textLayers = []
+        self.graphicsLayers = []
 
         // Create default layers
         let mainVideoLayer = VideoLayer(name: "V1", zIndex: 0)
         let pipVideoLayer = VideoLayer(name: "V2", zIndex: 1)
         let mainAudioLayer = AudioLayer(name: "Audio", zIndex: -1)
+        let textLayer = TextLayer(name: "Text", zIndex: 100)
+        let graphicsLayer = GraphicsLayer(name: "Graphics", zIndex: 101)
 
         self.videoLayers.append(mainVideoLayer)
         self.videoLayers.append(pipVideoLayer)
         self.audioLayers.append(mainAudioLayer)
+        self.textLayers.append(textLayer)
+        self.graphicsLayers.append(graphicsLayer)
     }
 
     var duration: CMTime {
@@ -45,6 +57,24 @@ final class Timeline {
         }
 
         for layer in audioLayers {
+            for clip in layer.clips {
+                let clipEnd = CMTimeAdd(clip.cmTimelineStartTime, clip.cmDuration)
+                if CMTimeCompare(clipEnd, maxDuration) > 0 {
+                    maxDuration = clipEnd
+                }
+            }
+        }
+
+        for layer in textLayers {
+            for clip in layer.clips {
+                let clipEnd = CMTimeAdd(clip.cmTimelineStartTime, clip.cmDuration)
+                if CMTimeCompare(clipEnd, maxDuration) > 0 {
+                    maxDuration = clipEnd
+                }
+            }
+        }
+
+        for layer in graphicsLayers {
             for clip in layer.clips {
                 let clipEnd = CMTimeAdd(clip.cmTimelineStartTime, clip.cmDuration)
                 if CMTimeCompare(clipEnd, maxDuration) > 0 {
@@ -82,5 +112,27 @@ final class Timeline {
         let layer = AudioLayer(name: name, zIndex: minZIndex - 1)
         audioLayers.append(layer)
         return layer
+    }
+
+    func addTextLayer(name: String) -> TextLayer {
+        let maxZIndex = textLayers.map { $0.zIndex }.max() ?? 100
+        let layer = TextLayer(name: name, zIndex: maxZIndex + 1)
+        textLayers.append(layer)
+        return layer
+    }
+
+    func addGraphicsLayer(name: String) -> GraphicsLayer {
+        let maxZIndex = graphicsLayers.map { $0.zIndex }.max() ?? 101
+        let layer = GraphicsLayer(name: name, zIndex: maxZIndex + 1)
+        graphicsLayers.append(layer)
+        return layer
+    }
+
+    var mainTextLayer: TextLayer? {
+        textLayers.first
+    }
+
+    var mainGraphicsLayer: GraphicsLayer? {
+        graphicsLayers.first
     }
 }

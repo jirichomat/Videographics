@@ -12,16 +12,32 @@ struct ToolbarView: View {
         HStack(spacing: 0) {
             // Add Media Menu
             Menu {
-                Button {
-                    viewModel.showingMediaPicker = true
-                } label: {
-                    Label("From Photo Library", systemImage: "photo.on.rectangle")
+                Section("Video") {
+                    Button {
+                        viewModel.showingMediaPicker = true
+                    } label: {
+                        Label("From Photo Library", systemImage: "photo.on.rectangle")
+                    }
+
+                    Button {
+                        viewModel.showingURLImport = true
+                    } label: {
+                        Label("From URL", systemImage: "link")
+                    }
                 }
 
-                Button {
-                    viewModel.showingURLImport = true
-                } label: {
-                    Label("From URL", systemImage: "link")
+                Section("Overlays") {
+                    Button {
+                        viewModel.addTextOverlay()
+                    } label: {
+                        Label("Text", systemImage: "textformat")
+                    }
+
+                    Button {
+                        viewModel.addGraphicsOverlay()
+                    } label: {
+                        Label("Image/Sticker", systemImage: "photo")
+                    }
                 }
             } label: {
                 VStack(spacing: 2) {
