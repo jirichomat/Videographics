@@ -28,7 +28,8 @@ actor CompositionEngine {
 
     /// Build an AVMutableComposition from a Timeline
     /// Default render size is 1080x1920 (portrait 9:16)
-    func buildComposition(from timeline: Timeline, renderSize: CGSize = CGSize(width: 1080, height: 1920)) async -> CompositionResult? {
+    /// - Parameter forExport: When true, includes Core Animation overlays (text, captions). Must be false for AVPlayerItem preview.
+    func buildComposition(from timeline: Timeline, renderSize: CGSize = CGSize(width: 1080, height: 1920), forExport: Bool = false) async -> CompositionResult? {
         let composition = AVMutableComposition()
         var clipInfos: [ClipTrackInfo] = []
 
@@ -83,7 +84,8 @@ actor CompositionEngine {
             for: composition,
             clipInfos: clipInfos,
             renderSize: renderSize,
-            timeline: timeline
+            timeline: timeline,
+            forExport: forExport
         )
 
         return CompositionResult(composition: composition, videoComposition: videoComposition)
@@ -104,10 +106,38 @@ actor CompositionEngine {
             let videoTracks = try await asset.loadTracks(withMediaType: .video)
             guard let sourceVideoTrack = videoTracks.first else { return nil }
 
+            // Load actual asset duration to validate source time range
+            let assetDuration = try await asset.load(.duration)
+
+            // Validate and clamp source time range to asset bounds
+            var validatedSourceStart = clip.cmSourceStartTime
+            var validatedDuration = clip.cmDuration
+
+            // If sourceStartTime is beyond asset duration, this clip is invalid
+            if CMTimeCompare(validatedSourceStart, assetDuration) >= 0 {
+                print("Invalid clip: sourceStartTime (\(validatedSourceStart.seconds)s) >= assetDuration (\(assetDuration.seconds)s)")
+                // Reset to start of asset with original clip duration clamped
+                validatedSourceStart = .zero
+                validatedDuration = CMTimeMinimum(clip.cmDuration, assetDuration)
+            }
+
+            // Clamp duration if sourceStart + duration exceeds asset duration
+            let maxDuration = CMTimeSubtract(assetDuration, validatedSourceStart)
+            if CMTimeCompare(validatedDuration, maxDuration) > 0 {
+                print("Clamping clip duration from \(validatedDuration.seconds)s to \(maxDuration.seconds)s")
+                validatedDuration = maxDuration
+            }
+
+            // Ensure we have a valid duration
+            if CMTimeCompare(validatedDuration, .zero) <= 0 {
+                print("Invalid clip: zero or negative duration after clamping")
+                return nil
+            }
+
             // Define the time range from the source
             let sourceTimeRange = CMTimeRange(
-                start: clip.cmSourceStartTime,
-                duration: clip.cmDuration
+                start: validatedSourceStart,
+                duration: validatedDuration
             )
 
             // Insert video
@@ -117,7 +147,7 @@ actor CompositionEngine {
                 at: clip.cmTimelineStartTime
             )
 
-            // Get source video dimensions and update clip if needed
+            // Get source video dimensions and preferred transform
             let naturalSize = try await sourceVideoTrack.load(.naturalSize)
             let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
 
@@ -126,12 +156,18 @@ actor CompositionEngine {
             let actualWidth = abs(transformedSize.width)
             let actualHeight = abs(transformedSize.height)
 
-            // Update clip's source size if not already set
-            if clip.sourceWidth == 0 || clip.sourceHeight == 0 {
-                await MainActor.run {
-                    clip.sourceWidth = Int(actualWidth)
-                    clip.sourceHeight = Int(actualHeight)
-                }
+            // Always update clip's transform and source size to ensure they're correct
+            // This handles cases where the clip was created before we had this data
+            await MainActor.run {
+                // Store the preferred transform for use during composition
+                clip.preferredTransform = preferredTransform
+
+                // Store the TRANSFORMED (post-rotation) dimensions
+                // This represents what the video looks like after applying preferredTransform
+                clip.sourceWidth = Int(actualWidth)
+                clip.sourceHeight = Int(actualHeight)
+
+                print("[TRANSFORM] Clip \(clip.id.uuidString.prefix(8)): naturalSize=\(naturalSize), preferredTransform=\(preferredTransform), finalSize=\(actualWidth)x\(actualHeight)")
             }
 
             // Insert audio if available
@@ -147,9 +183,10 @@ actor CompositionEngine {
             }
 
             // Return clip info for video composition building
+            // Use validatedDuration to match what was actually inserted
             let timelineRange = CMTimeRange(
                 start: clip.cmTimelineStartTime,
-                duration: clip.cmDuration
+                duration: validatedDuration
             )
 
             return ClipTrackInfo(
@@ -193,11 +230,13 @@ actor CompositionEngine {
     }
 
     /// Create video composition with layer instructions for transforms and transitions
+    /// - Parameter forExport: When true, includes Core Animation overlays. Must be false for AVPlayerItem.
     private func buildVideoComposition(
         for composition: AVMutableComposition,
         clipInfos: [ClipTrackInfo],
         renderSize: CGSize,
-        timeline: Timeline
+        timeline: Timeline,
+        forExport: Bool
     ) -> AVMutableVideoComposition? {
         guard !clipInfos.isEmpty else { return nil }
 
@@ -205,128 +244,125 @@ actor CompositionEngine {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
 
-        // Group clips by their timeline position to create instructions
-        // Sort by start time
-        let sortedClips = clipInfos.sorted { $0.timeRange.start < $1.timeRange.start }
-
-        var instructions: [AVMutableVideoCompositionInstruction] = []
-
-        // Create instructions for each clip, handling transitions
-        for (index, clipInfo) in sortedClips.enumerated() {
-            let instruction = AVMutableVideoCompositionInstruction()
-
-            // Find the video track in the composition
-            guard let track = composition.track(withTrackID: clipInfo.trackID) else {
-                continue
-            }
-
-            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-
-            // Calculate and apply the transform for this clip
-            let transform = clipInfo.clip.calculateTransform(for: renderSize)
-
-            // Check if there's a transition from this clip
-            if let transition = clipInfo.transition,
-               index + 1 < sortedClips.count {
-                let nextClipInfo = sortedClips[index + 1]
-                let transitionDuration = transition.cmDuration
-
-                // Calculate the transition time range
-                let transitionStart = CMTimeSubtract(clipInfo.timeRange.end, transitionDuration)
-
-                // Create instruction for the main clip portion (before transition)
-                let mainClipDuration = CMTimeSubtract(clipInfo.timeRange.duration, transitionDuration)
-                let mainClipRange = CMTimeRange(start: clipInfo.timeRange.start, duration: mainClipDuration)
-
-                if CMTimeCompare(mainClipDuration, .zero) > 0 {
-                    let mainInstruction = AVMutableVideoCompositionInstruction()
-                    mainInstruction.timeRange = mainClipRange
-
-                    let mainLayerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-                    mainLayerInstruction.setTransform(transform, at: mainClipRange.start)
-                    mainInstruction.layerInstructions = [mainLayerInstruction]
-                    instructions.append(mainInstruction)
-                }
-
-                // Create transition instruction
-                let transitionRange = CMTimeRange(start: transitionStart, duration: transitionDuration)
-                let transitionInstruction = AVMutableVideoCompositionInstruction()
-                transitionInstruction.timeRange = transitionRange
-
-                // Apply transition effect based on type
-                let fromLayerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-                fromLayerInstruction.setTransform(transform, at: transitionStart)
-
-                // Apply transition effect to the from clip
-                applyTransitionEffect(
-                    transition: transition,
-                    toInstruction: fromLayerInstruction,
-                    startTime: transitionStart,
-                    duration: transitionDuration,
-                    renderSize: renderSize,
-                    isFromClip: true
-                )
-
-                var layerInstructions = [fromLayerInstruction]
-
-                // If the next clip overlaps with the transition, include it
-                if let nextTrack = composition.track(withTrackID: nextClipInfo.trackID) {
-                    let nextTransform = nextClipInfo.clip.calculateTransform(for: renderSize)
-                    let toLayerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: nextTrack)
-                    toLayerInstruction.setTransform(nextTransform, at: transitionStart)
-
-                    applyTransitionEffect(
-                        transition: transition,
-                        toInstruction: toLayerInstruction,
-                        startTime: transitionStart,
-                        duration: transitionDuration,
-                        renderSize: renderSize,
-                        isFromClip: false
-                    )
-
-                    layerInstructions.append(toLayerInstruction)
-                }
-
-                transitionInstruction.layerInstructions = layerInstructions
-                instructions.append(transitionInstruction)
-
-            } else {
-                // No transition - normal clip instruction
-                instruction.timeRange = clipInfo.timeRange
-                layerInstruction.setTransform(transform, at: clipInfo.timeRange.start)
-                instruction.layerInstructions = [layerInstruction]
-                instructions.append(instruction)
-            }
-        }
-
-        // Sort instructions by start time to ensure proper order
-        instructions.sort { $0.timeRange.start < $1.timeRange.start }
+        // Build non-overlapping instructions that handle multiple layers
+        let instructions = buildMergedInstructions(
+            for: composition,
+            clipInfos: clipInfos,
+            renderSize: renderSize
+        )
 
         // Fill gaps with black instructions to prevent raw video showing
         let timelineDuration = timeline.duration
-        instructions = fillGapsWithBlackInstructions(
+        let finalInstructions = fillGapsWithBlackInstructions(
             instructions: instructions,
             timelineDuration: timelineDuration
         )
 
-        videoComposition.instructions = instructions
+        videoComposition.instructions = finalInstructions
 
-        // Add text and graphics overlays using Core Animation
-        let animationTool = buildOverlayLayers(
-            timeline: timeline,
-            renderSize: renderSize,
-            duration: timelineDuration
-        )
-        if let tool = animationTool {
-            videoComposition.animationTool = tool
+        // Add text and graphics overlays using Core Animation (export only)
+        // AVVideoCompositionCoreAnimationTool cannot be used with AVPlayerItem for preview
+        if forExport {
+            let animationTool = buildOverlayLayers(
+                timeline: timeline,
+                renderSize: renderSize,
+                duration: timelineDuration
+            )
+            if let tool = animationTool {
+                videoComposition.animationTool = tool
+            }
         }
 
         return videoComposition
     }
 
+    /// Build merged instructions that handle overlapping clips from different layers
+    private func buildMergedInstructions(
+        for composition: AVMutableComposition,
+        clipInfos: [ClipTrackInfo],
+        renderSize: CGSize
+    ) -> [AVMutableVideoCompositionInstruction] {
+        guard !clipInfos.isEmpty else { return [] }
+
+        // Collect all unique time points where visibility changes
+        var timePoints = Set<CMTime>()
+        for clipInfo in clipInfos {
+            timePoints.insert(clipInfo.timeRange.start)
+            timePoints.insert(clipInfo.timeRange.end)
+        }
+
+        // Sort time points
+        let sortedTimePoints = timePoints.sorted { CMTimeCompare($0, $1) < 0 }
+
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+
+        // Create an instruction for each segment between time points
+        for i in 0..<(sortedTimePoints.count - 1) {
+            let segmentStart = sortedTimePoints[i]
+            let segmentEnd = sortedTimePoints[i + 1]
+            let segmentDuration = CMTimeSubtract(segmentEnd, segmentStart)
+
+            // Skip zero-duration segments
+            if CMTimeCompare(segmentDuration, .zero) <= 0 {
+                continue
+            }
+
+            let segmentRange = CMTimeRange(start: segmentStart, duration: segmentDuration)
+
+            // Find all clips visible during this segment
+            var visibleClips: [ClipTrackInfo] = []
+            for clipInfo in clipInfos {
+                // Clip is visible if its time range contains this segment
+                let clipStart = clipInfo.timeRange.start
+                let clipEnd = clipInfo.timeRange.end
+
+                // Check if segment is within clip's time range
+                if CMTimeCompare(segmentStart, clipStart) >= 0 &&
+                   CMTimeCompare(segmentEnd, clipEnd) <= 0 {
+                    visibleClips.append(clipInfo)
+                }
+            }
+
+            // Skip segments with no visible clips (will be filled with black later)
+            if visibleClips.isEmpty {
+                continue
+            }
+
+            // Sort by track ID (higher zIndex = higher track ID = rendered on top)
+            // Layer instructions are applied in reverse order, so lower index = on top
+            visibleClips.sort { $0.trackID > $1.trackID }
+
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = segmentRange
+
+            var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
+
+            for clipInfo in visibleClips {
+                guard let track = composition.track(withTrackID: clipInfo.trackID) else {
+                    continue
+                }
+
+                let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+                let transform = clipInfo.clip.calculateTransform(for: renderSize)
+                layerInstruction.setTransform(transform, at: segmentStart)
+                layerInstructions.append(layerInstruction)
+
+                print("[COMPOSITION] Segment \(i): clip=\(clipInfo.clip.id.uuidString.prefix(8)), trackID=\(clipInfo.trackID)")
+                print("[COMPOSITION]   sourceSize=\(clipInfo.clip.sourceWidth)x\(clipInfo.clip.sourceHeight)")
+                print("[COMPOSITION]   prefTransform=[\(clipInfo.clip.preferredTransformA), \(clipInfo.clip.preferredTransformB), \(clipInfo.clip.preferredTransformC), \(clipInfo.clip.preferredTransformD)]")
+                print("[COMPOSITION]   finalTransform=[a=\(transform.a), b=\(transform.b), c=\(transform.c), d=\(transform.d), tx=\(transform.tx), ty=\(transform.ty)]")
+            }
+
+            instruction.layerInstructions = layerInstructions
+            instructions.append(instruction)
+        }
+
+        return instructions
+    }
+
     // MARK: - Text and Graphics Overlays
 
-    /// Build overlay layers for text, graphics, and infographics
+    /// Build overlay layers for text, graphics, infographics, and captions
     private func buildOverlayLayers(
         timeline: Timeline,
         renderSize: CGSize,
@@ -335,8 +371,11 @@ actor CompositionEngine {
         let hasTextOverlays = timeline.textLayers.contains { !$0.clips.isEmpty && $0.isVisible }
         let hasGraphicsOverlays = timeline.graphicsLayers.contains { !$0.clips.isEmpty && $0.isVisible }
         let hasInfographicOverlays = timeline.infographicLayers.contains { !$0.clips.isEmpty && $0.isVisible }
+        let hasCaptionOverlays = timeline.captionLayers.contains { !$0.clips.isEmpty && $0.isVisible }
 
-        guard hasTextOverlays || hasGraphicsOverlays || hasInfographicOverlays else { return nil }
+        print("[OVERLAY] Building overlays - text:\(hasTextOverlays) graphics:\(hasGraphicsOverlays) infographic:\(hasInfographicOverlays) captions:\(hasCaptionOverlays)")
+
+        guard hasTextOverlays || hasGraphicsOverlays || hasInfographicOverlays || hasCaptionOverlays else { return nil }
 
         // Parent layer that contains everything
         let parentLayer = CALayer()
@@ -381,6 +420,24 @@ actor CompositionEngine {
         for infographicLayer in sortedInfographicLayers {
             for clip in infographicLayer.sortedClips {
                 if let layer = createInfographicLayer(from: clip, renderSize: renderSize, duration: duration) {
+                    parentLayer.addSublayer(layer)
+                }
+            }
+        }
+
+        // Add caption layers
+        let sortedCaptionLayers = timeline.captionLayers
+            .filter { $0.isVisible }
+            .sorted { $0.zIndex < $1.zIndex }
+
+        print("[OVERLAY] Processing \(sortedCaptionLayers.count) visible caption layers")
+        for captionLayer in sortedCaptionLayers {
+            print("[OVERLAY] Caption layer has \(captionLayer.clips.count) clips")
+            for clip in captionLayer.sortedClips {
+                print("[OVERLAY] Creating caption layers for clip with \(clip.words.count) words, start=\(clip.cmTimelineStartTime.seconds)s")
+                let layers = createCaptionLayers(from: clip, renderSize: renderSize, duration: duration)
+                print("[OVERLAY] Created \(layers.count) caption CALayers")
+                for layer in layers {
                     parentLayer.addSublayer(layer)
                 }
             }
@@ -610,6 +667,528 @@ actor CompositionEngine {
         )
 
         return imageLayer
+    }
+
+    /// Create CALayers for a caption clip
+    /// Returns multiple layers for word-by-word animation styles
+    private nonisolated func createCaptionLayers(
+        from clip: CaptionClip,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> [CALayer] {
+        let words = clip.words
+        guard !words.isEmpty else { return [] }
+
+        // Route premium styles to the premium renderer
+        let style = clip.style
+        if style.usesPremiumRenderer {
+            return createPremiumCaptionLayers(from: clip, renderSize: renderSize, duration: duration)
+        }
+
+        // Capture clip properties
+        let fontName = clip.fontName
+        let fontSize = clip.fontSize
+        let clipScale = clip.scale
+        let textColorHex = clip.textColorHex
+        let highlightColorHex = clip.highlightColorHex
+        let backgroundColorHex = clip.backgroundColorHex
+        let positionX = clip.positionX
+        let positionY = clip.positionY
+        let maxWordsPerLine = clip.maxWordsPerLine
+        let showBackground = clip.showBackground
+        let clipStartTime = clip.cmTimelineStartTime
+        let clipEndTime = clip.cmTimelineEndTime
+
+        // Group words into lines
+        let lines = groupWordsIntoLines(words, maxPerLine: maxWordsPerLine)
+
+        // For animated styles (TikTok, Karaoke), create separate layers for each word segment
+        if style.hasWordAnimation {
+            return createAnimatedCaptionLayers(
+                words: words,
+                lines: lines,
+                fontName: fontName,
+                fontSize: fontSize,
+                scale: clipScale,
+                textColorHex: textColorHex,
+                highlightColorHex: highlightColorHex,
+                backgroundColorHex: backgroundColorHex,
+                positionX: positionX,
+                positionY: positionY,
+                showBackground: showBackground,
+                clipStartTime: clipStartTime,
+                clipEndTime: clipEndTime,
+                renderSize: renderSize,
+                totalDuration: duration,
+                style: style
+            )
+        } else {
+            // For static styles, create simple text layers for each line
+            return createStaticCaptionLayers(
+                lines: lines,
+                fontName: fontName,
+                fontSize: fontSize,
+                scale: clipScale,
+                textColorHex: textColorHex,
+                backgroundColorHex: backgroundColorHex,
+                positionX: positionX,
+                positionY: positionY,
+                showBackground: showBackground,
+                clipStartTime: clipStartTime,
+                clipEndTime: clipEndTime,
+                renderSize: renderSize,
+                totalDuration: duration
+            )
+        }
+    }
+
+    /// Group words into lines for display
+    private nonisolated func groupWordsIntoLines(_ words: [CaptionWord], maxPerLine: Int) -> [[CaptionWord]] {
+        var lines: [[CaptionWord]] = []
+        var currentLine: [CaptionWord] = []
+
+        for word in words {
+            currentLine.append(word)
+            if currentLine.count >= maxPerLine {
+                lines.append(currentLine)
+                currentLine = []
+            }
+        }
+
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+
+        return lines
+    }
+
+    /// Create static caption layers (Classic, Minimal, Bold, Outline styles)
+    private nonisolated func createStaticCaptionLayers(
+        lines: [[CaptionWord]],
+        fontName: String,
+        fontSize: Float,
+        scale: Float,
+        textColorHex: String,
+        backgroundColorHex: String?,
+        positionX: Float,
+        positionY: Float,
+        showBackground: Bool,
+        clipStartTime: CMTime,
+        clipEndTime: CMTime,
+        renderSize: CGSize,
+        totalDuration: CMTime
+    ) -> [CALayer] {
+        var layers: [CALayer] = []
+
+        for (lineIndex, line) in lines.enumerated() {
+            guard !line.isEmpty else { continue }
+
+            // Calculate timing for this line
+            let lineStartSeconds = line.first?.startTimeSeconds ?? 0
+            let lineEndSeconds = line.last?.endTimeSeconds ?? 0
+
+            // Create text for this line
+            let lineText = line.map { $0.word }.joined(separator: " ")
+
+            // Create container layer for background + text
+            let containerLayer = CALayer()
+            containerLayer.contentsScale = 2.0
+
+            // Create text layer with attributed string for reliable rendering
+            let textLayer = CATextLayer()
+            let scaledFontSize = CGFloat(fontSize) * CGFloat(scale)
+            let font = UIFont(name: fontName, size: scaledFontSize) ?? UIFont.systemFont(ofSize: scaledFontSize, weight: .semibold)
+            let textColor = colorFromHex(textColorHex).flatMap { UIColor(cgColor: $0) } ?? UIColor.white
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+
+            let attributedString = NSAttributedString(
+                string: lineText,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: textColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+            )
+            textLayer.string = attributedString
+            textLayer.alignmentMode = .center
+            textLayer.isWrapped = true
+            textLayer.truncationMode = .none
+            textLayer.contentsScale = UIScreen.main.scale
+
+            // Calculate size
+            let maxWidth = renderSize.width * 0.9
+            let textSize = calculateTextSize(
+                text: lineText,
+                fontName: fontName,
+                fontSize: CGFloat(fontSize) * CGFloat(scale),
+                maxWidth: maxWidth
+            )
+
+            textLayer.bounds = CGRect(origin: .zero, size: textSize)
+
+            // Position text within container
+            let padding: CGFloat = showBackground ? 12 : 0
+            let containerSize = CGSize(
+                width: textSize.width + padding * 2,
+                height: textSize.height + padding * 2
+            )
+            containerLayer.bounds = CGRect(origin: .zero, size: containerSize)
+            textLayer.position = CGPoint(x: containerSize.width / 2, y: containerSize.height / 2)
+
+            // Add background if needed
+            if showBackground {
+                let bgColor = backgroundColorHex.flatMap { colorFromHex($0) } ?? CGColor(gray: 0, alpha: 0.7)
+                containerLayer.backgroundColor = bgColor
+                containerLayer.cornerRadius = 6
+            }
+
+            containerLayer.addSublayer(textLayer)
+
+            // Position container
+            let centerX = renderSize.width / 2 + CGFloat(positionX) * (renderSize.width / 2)
+            let lineOffset = CGFloat(lineIndex) * (containerSize.height + 8)
+            let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2) - lineOffset
+            containerLayer.position = CGPoint(x: centerX, y: centerY)
+
+            // Calculate absolute times
+            let lineStartTime = CMTimeAdd(clipStartTime, CMTime(seconds: lineStartSeconds, preferredTimescale: 600))
+            let lineEndTime = CMTimeAdd(clipStartTime, CMTime(seconds: lineEndSeconds, preferredTimescale: 600))
+
+            // Add visibility animation
+            addVisibilityAnimation(
+                to: containerLayer,
+                startTime: lineStartTime,
+                endTime: lineEndTime,
+                duration: totalDuration
+            )
+
+            layers.append(containerLayer)
+        }
+
+        return layers
+    }
+
+    /// Create animated caption layers (TikTok, Karaoke styles)
+    private nonisolated func createAnimatedCaptionLayers(
+        words: [CaptionWord],
+        lines: [[CaptionWord]],
+        fontName: String,
+        fontSize: Float,
+        scale: Float,
+        textColorHex: String,
+        highlightColorHex: String,
+        backgroundColorHex: String?,
+        positionX: Float,
+        positionY: Float,
+        showBackground: Bool,
+        clipStartTime: CMTime,
+        clipEndTime: CMTime,
+        renderSize: CGSize,
+        totalDuration: CMTime,
+        style: CaptionStyle
+    ) -> [CALayer] {
+        var layers: [CALayer] = []
+
+        for (lineIndex, line) in lines.enumerated() {
+            guard !line.isEmpty else { continue }
+
+            // Calculate timing for this line
+            let lineStartSeconds = line.first?.startTimeSeconds ?? 0
+            let lineEndSeconds = line.last?.endTimeSeconds ?? 0
+            let lineText = line.map { $0.word }.joined(separator: " ")
+
+            // Create container
+            let containerLayer = CALayer()
+            containerLayer.contentsScale = 2.0
+
+            // Calculate size for the full line
+            let maxWidth = renderSize.width * 0.9
+            let textSize = calculateTextSize(
+                text: lineText,
+                fontName: fontName,
+                fontSize: CGFloat(fontSize) * CGFloat(scale),
+                maxWidth: maxWidth
+            )
+
+            let padding: CGFloat = showBackground ? 12 : 0
+            let containerSize = CGSize(
+                width: textSize.width + padding * 2,
+                height: textSize.height + padding * 2
+            )
+            containerLayer.bounds = CGRect(origin: .zero, size: containerSize)
+
+            // Add background if needed
+            if showBackground {
+                let bgColor = backgroundColorHex.flatMap { colorFromHex($0) } ?? CGColor(gray: 0, alpha: 0.7)
+                containerLayer.backgroundColor = bgColor
+                containerLayer.cornerRadius = 6
+            }
+
+            // Create base text layer with attributed string (unhighlighted)
+            let scaledFontSize = CGFloat(fontSize) * CGFloat(scale)
+            let font = UIFont(name: fontName, size: scaledFontSize) ?? UIFont.systemFont(ofSize: scaledFontSize, weight: .semibold)
+            let baseTextColor = colorFromHex(textColorHex).flatMap { UIColor(cgColor: $0) } ?? UIColor.white
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+
+            let baseTextLayer = CATextLayer()
+            let baseAttributedString = NSAttributedString(
+                string: lineText,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: baseTextColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+            )
+            baseTextLayer.string = baseAttributedString
+            baseTextLayer.alignmentMode = .center
+            baseTextLayer.isWrapped = true
+            baseTextLayer.truncationMode = .none
+            baseTextLayer.contentsScale = UIScreen.main.scale
+            baseTextLayer.bounds = CGRect(origin: .zero, size: textSize)
+            baseTextLayer.position = CGPoint(x: containerSize.width / 2, y: containerSize.height / 2)
+            containerLayer.addSublayer(baseTextLayer)
+
+            // For TikTok/Karaoke style, add animated highlight overlay
+            // This creates a word-by-word highlight effect
+            if style == .tiktok || style == .karaoke {
+                // Create highlight layer that will be revealed word by word
+                let highlightTextColor = colorFromHex(highlightColorHex).flatMap { UIColor(cgColor: $0) } ?? UIColor.yellow
+                let highlightAttributedString = NSAttributedString(
+                    string: lineText,
+                    attributes: [
+                        .font: font,
+                        .foregroundColor: highlightTextColor,
+                        .paragraphStyle: paragraphStyle
+                    ]
+                )
+
+                let highlightLayer = CATextLayer()
+                highlightLayer.string = highlightAttributedString
+                highlightLayer.alignmentMode = .center
+                highlightLayer.isWrapped = true
+                highlightLayer.truncationMode = .none
+                highlightLayer.contentsScale = UIScreen.main.scale
+                highlightLayer.bounds = CGRect(origin: .zero, size: textSize)
+                highlightLayer.position = CGPoint(x: containerSize.width / 2, y: containerSize.height / 2)
+
+                // Add mask animation to reveal words progressively
+                addWordRevealAnimation(
+                    to: highlightLayer,
+                    words: line,
+                    lineText: lineText,
+                    clipStartTime: clipStartTime,
+                    totalDuration: totalDuration,
+                    layerSize: textSize
+                )
+
+                containerLayer.addSublayer(highlightLayer)
+            }
+
+            // Position container
+            let centerX = renderSize.width / 2 + CGFloat(positionX) * (renderSize.width / 2)
+            let lineOffset = CGFloat(lineIndex) * (containerSize.height + 8)
+            let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2) - lineOffset
+            containerLayer.position = CGPoint(x: centerX, y: centerY)
+
+            // Calculate absolute times for visibility
+            let lineStartTime = CMTimeAdd(clipStartTime, CMTime(seconds: lineStartSeconds, preferredTimescale: 600))
+            let lineEndTime = CMTimeAdd(clipStartTime, CMTime(seconds: lineEndSeconds, preferredTimescale: 600))
+
+            // Add visibility animation
+            addVisibilityAnimation(
+                to: containerLayer,
+                startTime: lineStartTime,
+                endTime: lineEndTime,
+                duration: totalDuration
+            )
+
+            layers.append(containerLayer)
+        }
+
+        return layers
+    }
+
+    /// Add word reveal animation using mask
+    private nonisolated func addWordRevealAnimation(
+        to layer: CATextLayer,
+        words: [CaptionWord],
+        lineText: String,
+        clipStartTime: CMTime,
+        totalDuration: CMTime,
+        layerSize: CGSize
+    ) {
+        guard !words.isEmpty else { return }
+
+        // Create mask layer that will be animated
+        let maskLayer = CALayer()
+        maskLayer.backgroundColor = UIColor.white.cgColor
+        maskLayer.frame = CGRect(x: 0, y: 0, width: 0, height: layerSize.height)
+
+        layer.mask = maskLayer
+
+        // Create animation to reveal mask progressively
+        let animation = CAKeyframeAnimation(keyPath: "bounds.size.width")
+        animation.calculationMode = .discrete
+        animation.isRemovedOnCompletion = false
+        animation.fillMode = .forwards
+        animation.beginTime = AVCoreAnimationBeginTimeAtZero
+        animation.duration = CMTimeGetSeconds(totalDuration)
+
+        var keyTimes: [NSNumber] = []
+        var values: [NSNumber] = []
+
+        let totalSeconds = CMTimeGetSeconds(totalDuration)
+        let lineStartOffset = words.first?.startTimeSeconds ?? 0
+
+        // Calculate progressive reveal widths
+        var currentWidth: CGFloat = 0
+        let wordWidthIncrement = layerSize.width / CGFloat(words.count)
+
+        for word in words {
+            let wordStartTime = CMTimeAdd(clipStartTime, CMTime(seconds: word.startTimeSeconds, preferredTimescale: 600))
+            let normalizedTime = CMTimeGetSeconds(wordStartTime) / totalSeconds
+
+            keyTimes.append(NSNumber(value: normalizedTime))
+            values.append(NSNumber(value: Double(currentWidth)))
+
+            currentWidth += wordWidthIncrement
+        }
+
+        // Final state: full width
+        let lastWordEndTime = words.last?.endTimeSeconds ?? lineStartOffset
+        let endTime = CMTimeAdd(clipStartTime, CMTime(seconds: lastWordEndTime, preferredTimescale: 600))
+        let normalizedEndTime = CMTimeGetSeconds(endTime) / totalSeconds
+
+        keyTimes.append(NSNumber(value: normalizedEndTime))
+        values.append(NSNumber(value: Double(layerSize.width)))
+
+        animation.keyTimes = keyTimes
+        animation.values = values
+
+        maskLayer.add(animation, forKey: "revealAnimation")
+    }
+
+    // MARK: - Premium Caption Layers
+
+    /// Create CALayers for premium caption styles using PremiumCaptionRenderer
+    private nonisolated func createPremiumCaptionLayers(
+        from clip: CaptionClip,
+        renderSize: CGSize,
+        duration: CMTime
+    ) -> [CALayer] {
+        guard !clip.words.isEmpty else { return [] }
+
+        let style = clip.style
+        let fontName = clip.fontName
+        let textColorHex = clip.textColorHex
+        let highlightColorHex = clip.highlightColorHex
+        let positionY = clip.positionY
+        let clipScale = clip.scale
+        let clipStartTime = clip.cmTimelineStartTime
+
+        // Use resolved segments with pre-computed timing
+        let segmentsWithTiming = clip.resolvedSegmentsWithTiming()
+
+        var layers: [CALayer] = []
+
+        for (segIdx, seg) in segmentsWithTiming.enumerated() {
+            let segment = seg.lines
+            let segmentStartSeconds = seg.startTime
+            let segmentEndSeconds = seg.endTime
+            let lineTexts = segment.map { $0.map { $0.word }.joined(separator: " ") }
+
+            if style.coloringMode == .currentWord {
+                // Render one image per word transition for current-word highlighting
+                var flatIndex = 0
+                for line in segment {
+                    for word in line {
+                        let config = PremiumRenderConfig(
+                            lines: lineTexts,
+                            style: style,
+                            renderSize: renderSize,
+                            textColorHex: textColorHex,
+                            highlightColorHex: highlightColorHex,
+                            fontName: fontName,
+                            scale: clipScale,
+                            currentWordIndex: flatIndex
+                        )
+
+                        guard let cgImage = PremiumCaptionRenderer.render(config: config) else {
+                            flatIndex += 1
+                            continue
+                        }
+
+                        let imageLayer = CALayer()
+                        imageLayer.contents = cgImage
+                        imageLayer.contentsGravity = .resizeAspect
+                        imageLayer.contentsScale = 1.0
+
+                        let imageHeight = CGFloat(cgImage.height)
+                        imageLayer.bounds = CGRect(origin: .zero, size: CGSize(width: renderSize.width, height: imageHeight))
+
+                        let centerX = renderSize.width / 2
+                        let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2)
+                        imageLayer.position = CGPoint(x: centerX, y: centerY)
+
+                        let wordStartTime = CMTimeAdd(clipStartTime, CMTime(seconds: word.startTimeSeconds, preferredTimescale: 600))
+                        let wordEndTime = CMTimeAdd(clipStartTime, CMTime(seconds: word.endTimeSeconds, preferredTimescale: 600))
+
+                        addVisibilityAnimation(
+                            to: imageLayer,
+                            startTime: wordStartTime,
+                            endTime: wordEndTime,
+                            duration: duration
+                        )
+
+                        layers.append(imageLayer)
+                        flatIndex += 1
+                    }
+                }
+            } else {
+                // perLine or uniform: render one image per segment
+                let config = PremiumRenderConfig(
+                    lines: lineTexts,
+                    style: style,
+                    renderSize: renderSize,
+                    textColorHex: textColorHex,
+                    highlightColorHex: highlightColorHex,
+                    fontName: fontName,
+                    scale: clipScale
+                )
+
+                guard let cgImage = PremiumCaptionRenderer.render(config: config) else { continue }
+
+                let imageLayer = CALayer()
+                imageLayer.contents = cgImage
+                imageLayer.contentsGravity = .resizeAspect
+                imageLayer.contentsScale = 1.0
+
+                let imageHeight = CGFloat(cgImage.height)
+                imageLayer.bounds = CGRect(origin: .zero, size: CGSize(width: renderSize.width, height: imageHeight))
+
+                let centerX = renderSize.width / 2
+                let centerY = renderSize.height / 2 + CGFloat(positionY) * (renderSize.height / 2)
+                imageLayer.position = CGPoint(x: centerX, y: centerY)
+
+                let segStartTime = CMTimeAdd(clipStartTime, CMTime(seconds: segmentStartSeconds, preferredTimescale: 600))
+                let segEndTime = CMTimeAdd(clipStartTime, CMTime(seconds: segmentEndSeconds, preferredTimescale: 600))
+
+                addVisibilityAnimation(
+                    to: imageLayer,
+                    startTime: segStartTime,
+                    endTime: segEndTime,
+                    duration: duration
+                )
+
+                layers.append(imageLayer)
+            }
+        }
+
+        return layers
     }
 
     /// Add visibility animation to show layer only during clip duration

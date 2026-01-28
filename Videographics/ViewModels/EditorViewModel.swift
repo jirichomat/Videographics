@@ -63,6 +63,7 @@ class EditorViewModel {
 
     // MARK: - Inspector
     var showingInspector = false
+    var showingClipInfo = false
 
     // MARK: - Text Overlays
     var showingTextEditor = false
@@ -75,6 +76,13 @@ class EditorViewModel {
     // MARK: - Infographics
     var showingInfographicsSheet = false
     var editingInfographicClip: InfographicClip?
+
+    // MARK: - Captions
+    var showingCaptionEditor = false
+    var editingCaptionClip: CaptionClip?
+
+    // MARK: - Camera Recording
+    var showingCameraRecording = false
 
     // MARK: - Debug
     var showingDebugLog = false
@@ -148,7 +156,11 @@ class EditorViewModel {
                 let renderSize = CGSize(width: 1080, height: 1920)
                 let transform = clip.calculateTransform(for: renderSize)
                 ActionLogger.shared.logUIEvent("    Matrix", details: """
-                    [a=\(String(format: "%.3f", transform.a)), d=\(String(format: "%.3f", transform.d)), tx=\(String(format: "%.1f", transform.tx)), ty=\(String(format: "%.1f", transform.ty))]
+                    [a=\(String(format: "%.3f", transform.a)), b=\(String(format: "%.3f", transform.b)), c=\(String(format: "%.3f", transform.c)), d=\(String(format: "%.3f", transform.d)), tx=\(String(format: "%.1f", transform.tx)), ty=\(String(format: "%.1f", transform.ty))]
+                    """)
+                // Log stored preferred transform for debugging
+                ActionLogger.shared.logUIEvent("    PrefTransform", details: """
+                    [a=\(String(format: "%.3f", clip.preferredTransformA)), b=\(String(format: "%.3f", clip.preferredTransformB)), c=\(String(format: "%.3f", clip.preferredTransformC)), d=\(String(format: "%.3f", clip.preferredTransformD)), tx=\(String(format: "%.1f", clip.preferredTransformTx)), ty=\(String(format: "%.1f", clip.preferredTransformTy))]
                     """)
                 // Log raw SwiftData stored values
                 ActionLogger.shared.logUIEvent("    RAW DATA", details: """
@@ -184,6 +196,16 @@ class EditorViewModel {
         // Log infographic layers
         for (index, layer) in timeline.infographicLayers.enumerated() {
             ActionLogger.shared.logUIEvent("InfographicLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+        }
+
+        // Log caption layers
+        for (index, layer) in timeline.captionLayers.enumerated() {
+            ActionLogger.shared.logUIEvent("CaptionLayer[\(index)]", details: "name=\(layer.name), clips=\(layer.clips.count)")
+            for (clipIndex, clip) in layer.clips.enumerated() {
+                ActionLogger.shared.logUIEvent("  CaptionClip[\(clipIndex)]", details: """
+                    words=\(clip.words.count), start=\(clip.cmTimelineStartTime.seconds)s, duration=\(clip.cmDuration.seconds)s
+                    """)
+            }
         }
 
         ActionLogger.shared.logUIEvent("=== END PROJECT STATE ===")
@@ -398,8 +420,14 @@ class EditorViewModel {
         downloadProgress = 0
 
         do {
+            // Transparently handle YouTube URLs by extracting direct stream URL
+            var downloadURL = urlString
+            if YouTubeExtractorService.isYouTubeURL(urlString) {
+                downloadURL = try await YouTubeExtractorService.shared.extractVideoURL(from: urlString)
+            }
+
             let mediaInfo = try await URLVideoDownloader.shared.downloadVideo(
-                from: urlString,
+                from: downloadURL,
                 projectId: project.id
             ) { [weak self] progress in
                 Task { @MainActor in
@@ -447,10 +475,80 @@ class EditorViewModel {
         downloadProgress = 0
     }
 
+    // MARK: - Camera Recording Import
+
+    func importRecordedVideo(_ url: URL) async {
+        isImporting = true
+        importError = nil
+
+        do {
+            // Copy to project storage
+            let destinationURL = try await FileStorageService.shared.copyMediaToProject(
+                sourceURL: url,
+                projectId: project.id
+            )
+
+            // Get video info
+            let asset = AVURLAsset(url: destinationURL)
+            let duration = try await asset.load(.duration)
+
+            var naturalSize = CGSize(width: 1080, height: 1920)
+            if let videoTrack = try await asset.loadTracks(withMediaType: .video).first {
+                naturalSize = try await videoTrack.load(.naturalSize)
+                let transform = try await videoTrack.load(.preferredTransform)
+                let transformedSize = naturalSize.applying(transform)
+                naturalSize = CGSize(
+                    width: abs(transformedSize.width),
+                    height: abs(transformedSize.height)
+                )
+            }
+
+            // Create video clip
+            let videoClip = VideoClip(
+                assetURL: destinationURL,
+                timelineStartTime: project.timeline?.duration ?? .zero,
+                duration: duration
+            )
+
+            // Generate thumbnails
+            let thumbnails = await ThumbnailGenerator.shared.generateThumbnails(
+                for: destinationURL,
+                duration: duration
+            )
+            videoClip.thumbnails = thumbnails
+
+            // Add to main video layer
+            if let mainLayer = project.timeline?.mainVideoLayer {
+                mainLayer.addClip(videoClip)
+            }
+
+            // Update project thumbnail if this is the first clip
+            if project.thumbnailData == nil, let firstThumb = thumbnails.first {
+                project.thumbnailData = firstThumb
+            }
+
+            project.modifiedAt = Date()
+
+            // Rebuild composition
+            await rebuildComposition()
+
+            // Clean up temporary recording file
+            try? FileManager.default.removeItem(at: url)
+
+        } catch {
+            importError = error
+        }
+
+        isImporting = false
+    }
+
     // MARK: - Clip Operations
 
-    func selectClip(_ clip: VideoClip?) {
+    func selectClip(_ clip: VideoClip?, showInfo: Bool = false) {
         selectedClip = clip
+        if showInfo && clip != nil && currentTool == .select {
+            showingClipInfo = true
+        }
     }
 
     func moveClipToLayer(_ clip: VideoClip, from sourceLayer: VideoLayer, to targetLayer: VideoLayer) {
@@ -539,6 +637,57 @@ class EditorViewModel {
         }
     }
 
+    func duplicateClipToNewLayer(_ clip: VideoClip, fromLayer: VideoLayer) {
+        guard let timeline = project.timeline,
+              let assetURL = clip.assetURL else { return }
+
+        // Find another video layer to put the duplicate in
+        let videoLayers = timeline.videoLayers
+        var targetLayer: VideoLayer?
+
+        // Try to find another existing video layer
+        for layer in videoLayers where layer.id != fromLayer.id {
+            targetLayer = layer
+            break
+        }
+
+        // If no other layer exists, create a new one
+        if targetLayer == nil {
+            targetLayer = timeline.addVideoLayer(name: "Video \(videoLayers.count + 1)")
+        }
+
+        guard let target = targetLayer else { return }
+
+        // Create duplicate clip at the same timeline position
+        let newClip = VideoClip(
+            assetURL: assetURL,
+            timelineStartTime: clip.cmTimelineStartTime,
+            duration: clip.cmDuration,
+            sourceStartTime: clip.cmSourceStartTime,
+            scaleMode: clip.scaleMode,
+            sourceSize: clip.sourceSize
+        )
+
+        // Copy all properties
+        newClip.scale = clip.scale
+        newClip.positionX = clip.positionX
+        newClip.positionY = clip.positionY
+        newClip.volume = clip.volume
+        newClip.thumbnails = clip.thumbnails
+
+        // Add to target layer
+        target.addClip(newClip)
+
+        // Select the new clip
+        selectedClip = newClip
+
+        project.modifiedAt = Date()
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
     func setScaleMode(_ mode: VideoScaleMode) {
         guard let clip = selectedClip else { return }
 
@@ -584,6 +733,29 @@ class EditorViewModel {
                 project.modifiedAt = Date()
                 Task {
                     await rebuildComposition()
+                }
+            }
+        }
+    }
+
+    /// Cut at the current playhead position - shows confirmation dialog
+    func cutHere() {
+        // Find clip at current playhead position
+        guard let timeline = project.timeline else { return }
+
+        for layer in timeline.videoLayers {
+            for clip in layer.clips {
+                if CMTimeCompare(currentTime, clip.cmTimelineStartTime) > 0 &&
+                   CMTimeCompare(currentTime, clip.cmTimelineEndTime) < 0 {
+                    // Show confirmation for this clip
+                    pendingSplitClip = clip
+                    pendingSplitTime = currentTime
+                    showingSplitConfirmation = true
+
+                    Task {
+                        await loadSplitFrameThumbnails()
+                    }
+                    return
                 }
             }
         }
@@ -959,8 +1131,10 @@ class EditorViewModel {
         showingInspector = false
         showingTextEditor = false
         showingInfographicsSheet = false
+        showingCaptionEditor = false
         editingTextClip = nil
         editingInfographicClip = nil
+        editingCaptionClip = nil
 
         // Validate and fix clip positions
         validateAndFixClipPositions()
@@ -1001,6 +1175,10 @@ class EditorViewModel {
         }
 
         for layer in timeline.infographicLayers {
+            layer.clips.removeAll()
+        }
+
+        for layer in timeline.captionLayers {
             layer.clips.removeAll()
         }
 
@@ -1255,6 +1433,97 @@ class EditorViewModel {
     }
 
     func deleteInfographicClip(_ clip: InfographicClip) {
+        guard let layer = clip.layer else { return }
+        layer.removeClip(clip)
+        project.modifiedAt = Date()
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    // MARK: - Caption Operations
+
+    func addCaption() {
+        editingCaptionClip = nil
+        showingCaptionEditor = true
+    }
+
+    func editCaptionClip(_ clip: CaptionClip) {
+        editingCaptionClip = clip
+        showingCaptionEditor = true
+    }
+
+    func saveCaptionClip(
+        words: [CaptionWord],
+        fullText: String,
+        languageCode: String,
+        style: CaptionStyle,
+        fontSize: Float,
+        textColorHex: String,
+        highlightColorHex: String,
+        positionX: Float,
+        positionY: Float,
+        scale: Float,
+        maxWordsPerLine: Int,
+        showBackground: Bool,
+        timelineStartTime: CMTime,
+        duration: CMTime,
+        customSegments: [CaptionSegment]? = nil
+    ) {
+        if let existingClip = editingCaptionClip {
+            // Update existing clip
+            existingClip.words = words
+            existingClip.fullText = fullText
+            existingClip.languageCode = languageCode
+            existingClip.style = style
+            existingClip.fontSize = fontSize
+            existingClip.textColorHex = textColorHex
+            existingClip.highlightColorHex = highlightColorHex
+            existingClip.positionX = positionX
+            existingClip.positionY = positionY
+            existingClip.scale = scale
+            existingClip.maxWordsPerLine = maxWordsPerLine
+            existingClip.showBackground = showBackground
+            existingClip.customSegments = customSegments
+            existingClip.setTimelineStartTime(timelineStartTime)
+            existingClip.setDuration(duration)
+        } else {
+            // Create new caption clip
+            let captionClip = CaptionClip(
+                words: words,
+                fullText: fullText,
+                languageCode: languageCode,
+                timelineStartTime: timelineStartTime,
+                duration: duration,
+                style: style,
+                fontSize: fontSize,
+                textColor: textColorHex,
+                highlightColor: highlightColorHex,
+                positionX: positionX,
+                positionY: positionY,
+                scale: scale,
+                maxWordsPerLine: maxWordsPerLine,
+                showBackground: showBackground
+            )
+            captionClip.customSegments = customSegments
+
+            // Add to main caption layer
+            if let captionLayer = project.timeline?.mainCaptionLayer {
+                captionLayer.addClip(captionClip)
+            }
+        }
+
+        project.modifiedAt = Date()
+        editingCaptionClip = nil
+        showingCaptionEditor = false
+
+        Task {
+            await rebuildComposition()
+        }
+    }
+
+    func deleteCaptionClip(_ clip: CaptionClip) {
         guard let layer = clip.layer else { return }
         layer.removeClip(clip)
         project.modifiedAt = Date()
